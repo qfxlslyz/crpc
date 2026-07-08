@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<root>
+  <!--日志配置-->
+  <log>
+    <!--日志文件路径-->
+    <log_path>./</log_path>
+    <log_prefix>test_rpc_server</log_prefix>
+
+    <!--单个日志文件的最大大小，单位 MB-->
+    <log_max_file_size>5</log_max_file_size>
+
+    <!--日志级别：DEBUG < INFO < WARN < ERROR，压测时设为NONE临时关闭日志-->
+    <rpc_log_level>NONE</rpc_log_level>
+    <app_log_level>NONE</app_log_level>
+
+    <!--日志写入异步 logger 的间隔，单位 ms-->
+    <log_sync_interval>500</log_sync_interval>
+  </log>
+
+  <coroutine>
+    <!--协程栈大小，单位 KB-->
+    <coroutine_stack_size>256</coroutine_stack_size>
+
+    <!--默认协程池大小-->
+    <coroutine_pool_size>1000</coroutine_pool_size>
+
+  </coroutine>
+
+  <!--自动生成的RPC请求ID的长度，单位 bit-->
+  <msg_req_len>20</msg_req_len>
+
+  <!--connect 调用的最大超时时间，单位 s-->
+  <max_connect_timeout>75</max_connect_timeout>
+
+  <!--IO 线程数量，至少为 1-->
+  <iothread_num>4</iothread_num>
+
+  <time_wheel>
+    <bucket_num>6</bucket_num>
+
+    <!--清理异常 TcpConnection 的间隔，单位 s-->
+    <interval>10</interval>
+  </time_wheel>
+
+  <server>
+    <ip>127.0.0.1</ip>
+    <port>20000</port>
+    <protocol>CRPC</protocol>
+  </server>
+</root>

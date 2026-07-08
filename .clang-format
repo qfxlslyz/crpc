@@ -1,0 +1,30 @@
+BasedOnStyle: Google
+Language: Cpp
+Standard: Cpp11
+ColumnLimit: 100
+UseTab: Always
+IndentWidth: 4
+TabWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeIsMainRegex: '$^'
+IncludeCategories:
+  - Regex: '^"crpc/'
+    Priority: 1
+  - Regex: '^<(algorithm|array|atomic|chrono|condition_variable|deque|exception|filesystem|functional|future|initializer_list|iomanip|ios|iosfwd|iostream|istream|limits|list|map|memory|mutex|numeric|ostream|queue|random|regex|set|sstream|stdexcept|string|string_view|thread|tuple|type_traits|unordered_map|unordered_set|utility|vector)>'
+    Priority: 2
+  - Regex: '^<(assert|ctype|errno|float|limits|math|stdarg|stddef|stdint|stdio|stdlib|string|time)\.h>'
+    Priority: 2
+  - Regex: '^<(arpa/|fcntl\.h|netinet/|pthread\.h|signal\.h|sys/|unistd\.h)'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 3
+  - Regex: '^"'
+    Priority: 4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false

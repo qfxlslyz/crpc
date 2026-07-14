@@ -74,8 +74,7 @@ void FdEvent::updateToReactor() {
 	event.events = listen_events_;
 	event.data.ptr = this;
 	if (!reactor_) {
-		// 某些 fd 会在协程迁移后清空 reactor_，再次使用时绑定到当前线程
-		// Reactor
+		// 尚未绑定 Reactor 的 fd 在首次注册事件时绑定到当前线程。
 		reactor_ = Reactor::getReactor();
 	}
 

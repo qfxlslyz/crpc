@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.0)
 project(crpc)
 
 SET(CMAKE_INSTALL_PREFIX ${PROJECT_SOURCE_DIR})
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_language(ASM)
 
 option(CRPC_ENABLE_MYSQL "Build CRPC with the optional MySQL plugin" OFF)

@@ -22,9 +22,6 @@ static thread_local Reactor* t_reactor_ptr = nullptr;
 
 static thread_local int t_max_epoll_timeout = 10000;  // 毫秒
 
-// 每个线程一个协程任务队列，用于把就绪 fd 对应的协程延后恢复
-static CoroutineTaskQueue* t_coroutine_task_queue = nullptr;
-
 Reactor::Reactor() {
 	// 一个线程不能创建多个 Reactor 对象
 	// assert(t_reactor_ptr == nullptr);
@@ -209,34 +206,9 @@ void Reactor::loop() {
 	is_looping_ = true;
 	stop_flag_ = false;
 
-	Coroutine* first_coroutine = nullptr;
-
 	while (!stop_flag_) {
 		const int MAX_EVENTS = 100;
 		epoll_event re_events[MAX_EVENTS + 1];
-
-		if (first_coroutine) {
-			// 上一轮 epoll
-			// 就绪的第一个协程延迟到本轮开头恢复，降低任务队列锁竞争
-			Coroutine::Resume(first_coroutine);
-			first_coroutine = nullptr;
-		}
-
-		// 主 Reactor 不需要从全局 CoroutineTaskQueue 中恢复协程，这项工作只由
-		// IO 线程执行
-		if (reactor_type_ != MainReactor) {
-			FdEvent* ptr = nullptr;
-			// 处理其他 SubReactor 投递过来的就绪协程
-			while (1) {
-				ptr = CoroutineTaskQueue::getCoroutineTaskQueue()->pop();
-				if (ptr) {
-					ptr->setReactor(this);
-					Coroutine::Resume(ptr->getCoroutine());
-				} else {
-					break;
-				}
-			}
-		}
 
 		// 执行外部线程投递的普通任务，例如添加协程、刷新时间轮等
 		Mutex::ScopedLock lock(mutex_);
@@ -249,105 +221,96 @@ void Reactor::loop() {
 				tmp_tasks[i]();
 			}
 		}
+
 		// 等待 fd 就绪；超时时间较长，主要依赖 eventfd/timerfd 唤醒
 		int rt = epoll_wait(epfd_, re_events, MAX_EVENTS, t_max_epoll_timeout);
 
 		if (rt < 0) {
 			ErrorLog << "epoll_wait error, skip, errno=" << strerror(errno);
-		} else {
-			for (int i = 0; i < rt; ++i) {
-				epoll_event one_event = re_events[i];
+			continue;
+		}
 
-				if (one_event.data.fd == wake_fd_ && (one_event.events & kRead)) {
-					// 唤醒事件
-					// 必须把 eventfd 读空，否则会持续触发可读事件
-					char buf[8];
-					while (1) {
-						if ((g_sys_read_fun(wake_fd_, buf, 8) == -1) && errno == EAGAIN) {
-							break;
-						}
-					}
+		// 先完整扫描本批 epoll 事件，再统一恢复就绪协程，
+		// 避免协程执行过程中对 Reactor 状态的修改干扰事件遍历。
+		std::vector<Coroutine*> ready_coroutines;
+		ready_coroutines.reserve(rt);
 
-				} else {
-					FdEvent* ptr = (FdEvent*)one_event.data.ptr;
-					if (ptr != nullptr) {
-						int fd = ptr->getFd();
+		for (int i = 0; i < rt; ++i) {
+			epoll_event one_event = re_events[i];
 
-						if ((!(one_event.events & EPOLLIN)) && (!(one_event.events & EPOLLOUT))) {
-							ErrorLog << "socket [" << fd << "] occur other unknow event:["
-									 << one_event.events << "], need unregister this socket";
-							delEventInLoopThread(fd);
-						} else {
-							// 如果注册了协程，将待恢复协程放入公共协程任务队列
-							if (ptr->getCoroutine()) {
-								// epoll_wait
-								// 返回后的第一个协程直接在当前线程恢复，不放入全局
-								// CoroutineTaskQueue 因为每次操作
-								// CoroutineTaskQueue 都需要加锁
-								if (!first_coroutine) {
-									first_coroutine = ptr->getCoroutine();
-									continue;
-								}
-								if (reactor_type_ == SubReactor) {
-									// SubReactor 采用抢占式迁移：摘掉 fd
-									// 事件，把协程交给任务队列恢复
-									delEventInLoopThread(fd);
-									ptr->setReactor(nullptr);
-									CoroutineTaskQueue::getCoroutineTaskQueue()->push(ptr);
-								} else {
-									// 主 Reactor 直接恢复 accept 协程
-									Coroutine::Resume(ptr->getCoroutine());
-									if (first_coroutine) {
-										first_coroutine = nullptr;
-									}
-								}
-
-							} else {
-								std::function<void()> read_cb;
-								std::function<void()> write_cb;
-								read_cb = ptr->getCallBack(kRead);
-								write_cb = ptr->getCallBack(kWrite);
-								// 如果是定时器事件，直接执行
-								if (fd == timer_fd_) {
-									// 定时器回调会读取 timerfd
-									// 并执行已到期任务
-									read_cb();
-									continue;
-								}
-								if (one_event.events & EPOLLIN) {
-									// 普通回调放入任务队列，避免在 epoll
-									// 事件遍历中执行过重逻辑
-									Mutex::ScopedLock lock(mutex_);
-									pending_tasks_.push_back(read_cb);
-								}
-								if (one_event.events & EPOLLOUT) {
-									Mutex::ScopedLock lock(mutex_);
-									pending_tasks_.push_back(write_cb);
-								}
-							}
-						}
+			// 唤醒事件 必须把 eventfd 读空，否则会持续触发可读事件
+			if (one_event.data.fd == wake_fd_ && (one_event.events & kRead)) {
+				char buf[8];
+				while (1) {
+					if ((g_sys_read_fun(wake_fd_, buf, 8) == -1) && errno == EAGAIN) {
+						break;
 					}
 				}
+				continue;
 			}
 
-			std::map<int, epoll_event> tmp_add;
-			std::vector<int> tmp_del;
+			FdEvent* ptr = (FdEvent*)one_event.data.ptr;
+			if (!ptr) {
+				continue;
+			}
+			int fd = ptr->getFd();
 
-			{
+			if ((!(one_event.events & EPOLLIN)) && (!(one_event.events & EPOLLOUT))) {
+				ErrorLog << "socket [" << fd << "] occur other unknow event:[" << one_event.events
+						 << "], need unregister this socket";
+				delEventInLoopThread(fd);
+				continue;
+			}
+
+			// 协程在本批事件遍历完成后由当前 Reactor 线程依次恢复。
+			if (Coroutine* coroutine = ptr->getCoroutine()) {
+				ready_coroutines.push_back(coroutine);
+				continue;
+			}
+			std::function<void()> read_cb;
+			std::function<void()> write_cb;
+			read_cb = ptr->getCallBack(kRead);
+			write_cb = ptr->getCallBack(kWrite);
+			// 如果是定时器事件，直接执行
+			if (fd == timer_fd_) {
+				// 定时器回调会读取 timerfd
+				// 并执行已到期任务
+				read_cb();
+				continue;
+			}
+			if (one_event.events & EPOLLIN) {
+				// 普通回调放入任务队列，避免在 epoll
+				// 事件遍历中执行过重逻辑
 				Mutex::ScopedLock lock(mutex_);
-				// 将本轮积累的 epoll 变更取出，统一在 Reactor 线程执行
-				tmp_add.swap(pending_add_fds_);
-				pending_add_fds_.clear();
+				pending_tasks_.push_back(read_cb);
+			}
+			if (one_event.events & EPOLLOUT) {
+				Mutex::ScopedLock lock(mutex_);
+				pending_tasks_.push_back(write_cb);
+			}
+		}
 
-				tmp_del.swap(pending_del_fds_);
-				pending_del_fds_.clear();
-			}
-			for (auto i = tmp_add.begin(); i != tmp_add.end(); ++i) {
-				addEventInLoopThread((*i).first, (*i).second);
-			}
-			for (auto i = tmp_del.begin(); i != tmp_del.end(); ++i) {
-				delEventInLoopThread((*i));
-			}
+		std::map<int, epoll_event> tmp_add;
+		std::vector<int> tmp_del;
+
+		{
+			Mutex::ScopedLock lock(mutex_);
+			// 将本轮积累的 epoll 变更取出，统一在 Reactor 线程执行
+			tmp_add.swap(pending_add_fds_);
+			pending_add_fds_.clear();
+
+			tmp_del.swap(pending_del_fds_);
+			pending_del_fds_.clear();
+		}
+		for (auto i = tmp_add.begin(); i != tmp_add.end(); ++i) {
+			addEventInLoopThread((*i).first, (*i).second);
+		}
+		for (auto i = tmp_del.begin(); i != tmp_del.end(); ++i) {
+			delEventInLoopThread((*i));
+		}
+
+		for (Coroutine* coroutine : ready_coroutines) {
+			Coroutine::Resume(coroutine);
 		}
 	}
 	DebugLog << "reactor loop end";
@@ -403,33 +366,6 @@ Timer* Reactor::getTimer() {
 
 void Reactor::setReactorType(ReactorType type) {
 	reactor_type_ = type;
-}
-
-CoroutineTaskQueue* CoroutineTaskQueue::getCoroutineTaskQueue() {
-	if (t_coroutine_task_queue) {
-		return t_coroutine_task_queue;
-	}
-	t_coroutine_task_queue = new CoroutineTaskQueue();
-	return t_coroutine_task_queue;
-}
-
-void CoroutineTaskQueue::push(FdEvent* cor) {
-	// 队列中存放 FdEvent，是为了恢复协程前能重新设置其所属 Reactor
-	Mutex::ScopedLock lock(mutex_);
-	task_.push(cor);
-	lock.unlock();
-}
-
-FdEvent* CoroutineTaskQueue::pop() {
-	FdEvent* re = nullptr;
-	Mutex::ScopedLock lock(mutex_);
-	if (task_.size() >= 1) {
-		re = task_.front();
-		task_.pop();
-	}
-	lock.unlock();
-
-	return re;
 }
 
 }  // namespace crpc

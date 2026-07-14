@@ -21,7 +21,6 @@
 #include <atomic>
 #include <functional>
 #include <map>
-#include <queue>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -108,23 +107,5 @@ private:
 
 	ReactorType reactor_type_{SubReactor};
 };
-
-/**
- * 协程任务队列（线程局部）
- * IO 线程用来分发待处理的连接事件，主协程从中取出 FdEvent 并 Resume 对应协程
- */
-class CoroutineTaskQueue {
-public:
-	static CoroutineTaskQueue* getCoroutineTaskQueue();
-
-	void push(FdEvent* fd);
-
-	FdEvent* pop();
-
-private:
-	std::queue<FdEvent*> task_;
-	Mutex mutex_;
-};
-
 }  // namespace crpc
 #endif

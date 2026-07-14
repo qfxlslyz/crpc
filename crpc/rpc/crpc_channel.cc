@@ -62,8 +62,8 @@ void CrpcChannel::CallMethod(const google::protobuf::MethodDescriptor* method,
 	}
 
 	// 先编码到 TcpConnection 的写缓冲区，sendAndRecv 内部负责真正写 socket
-	Codec::Ptr codec_ = client_->getConnection()->getCodec();
-	codec_->encode(client_->getConnection()->getOutBuffer(), &pb_struct);
+	Codec::Ptr codec = client_->getConnection()->getCodec();
+	codec->encode(client_->getConnection()->getOutBuffer(), &pb_struct);
 	if (!pb_struct.encode_succ) {
 		rpc_controller->setError(ERROR_FAILED_ENCODE, "encode rpc data error");
 		return;

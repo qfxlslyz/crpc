@@ -43,6 +43,24 @@ google::protobuf::Service
 
 客户端通过 CrpcChannel 发起调用，调用代码看起来是同步的；当连接、发送或接收需要等待 IO 就绪时，当前协程让出执行权，底层 Reactor 监听到事件后再恢复该协程。
 
+## 协程模型
+
+当前项目采用“每个线程一个主协程 + 多个子协程”的非对称协程模型。主协程不是业务入口的 `main()` 函数，而是当前线程中的调度上下文；子协程用于执行 accept、连接读写、RPC 调用等具体任务。
+
+```text
+主协程
+  -> Resume 子协程
+子协程执行 IO
+  -> 没有就绪时 Yield
+  -> 切回主协程
+主协程继续跑 Reactor::loop()
+  -> epoll_wait 等事件
+事件就绪
+  -> 再 Resume 对应子协程
+```
+
+因此，业务和 RPC 调用代码可以保持同步写法；当 `accept`、`read`、`write`、`connect` 或 `sleep` 需要等待时，hook 层会把 fd 注册到 Reactor，并让当前子协程 `Yield`。主协程继续运行事件循环，等 epoll 通知 IO 就绪后再恢复对应子协程。
+
 ## 环境要求
 
 - Linux

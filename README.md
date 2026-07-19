@@ -1,6 +1,8 @@
 # CRPC
 
-CRPC（Coroutine RPC）是一个基于 C++11 的轻量级协程 RPC 框架。它使用 Reactor、epoll、用户态协程、Protobuf 和内置二进制编解码构建核心 RPC 链路，对外提供同步编码风格，底层在等待 socket IO 时自动让出当前协程，让线程继续处理其他事件。
+CRPC（Coroutine RPC）是一个基于 C++11 的轻量级协程 RPC 框架。它使用 Reactor、epoll、用户态协程、Protobuf 和内置二进制编解码构建核心 RPC 链路，对外同时提供同步和异步 RPC Channel，底层在等待 socket IO 时自动让出当前协程，让线程继续处理其他事件。
+
+CRPC 采用多线程 Reactor 与用户态协程结合的协作式 M:N 模型。连接协程固定由所属 IO 线程的 SubReactor 调度，当前不支持跨 IO 线程的协程迁移和工作窃取。
 
 这个项目聚焦 RPC 框架的核心机制，适合学习、实验和阅读源码。当前实现刻意保持较小的功能边界，方便理解网络模型、协程调度和 RPC 分发流程。
 
@@ -11,19 +13,26 @@ CRPC（Coroutine RPC）是一个基于 C++11 的轻量级协程 RPC 框架。它
 - socket hook 将阻塞式读写转换为协程让出和恢复。
 - 内置二进制 RPC 编解码处理 TCP 粘包和拆包。
 - 基于 Protobuf Service 完成服务注册、方法查找、请求分发和响应编码。
-- 客户端保持同步调用写法，等待响应时当前协程 Yield。
+- `CrpcChannel` 提供同步调用写法，等待响应时当前协程 Yield。
+- `CrpcAsyncChannel` 支持独立客户端直接发起异步 RPC，实际调用由共享 IO 线程中的工作协程执行。
+- 异步调用支持 Closure 完成回调以及 `wait()` 等待结果。
 - TimerEvent 支持连接、发送、接收和空闲连接超时控制。
 - 内置 RPC 服务端、客户端和协程调度示例。
 
 ## 架构概览
 
 ```text
-client stub
-   |
-   v
-CrpcChannel
-   |
-   v
+                         +-> CrpcChannel --------------------+
+client stub -------------+                                   |
+                         +-> CrpcAsyncChannel                |
+                               |                              |
+                               v                              |
+                         AsyncClientRuntime                   |
+                         (IOThread + Reactor + coroutine)      |
+                               |                              |
+                               +------------------------------+
+                                                              |
+                                                              v
 TcpClient / TcpConnection
    |
    v
@@ -41,7 +50,7 @@ google::protobuf::Service
 
 服务端启动后读取 XML 配置，创建 TcpServer、主 Reactor 和 IOThread。主 Reactor 负责 accept，新连接分发给 IO 线程；TcpConnection 负责读写缓冲区、内部 RPC 编解码和请求响应；RpcDispatcher 根据 `service_full_name` 查找 Protobuf Service 和 Method 并调用业务实现。
 
-客户端通过 CrpcChannel 发起调用，调用代码看起来是同步的；当连接、发送或接收需要等待 IO 就绪时，当前协程让出执行权，底层 Reactor 监听到事件后再恢复该协程。
+客户端可以通过 CrpcChannel 发起同步调用，也可以通过 CrpcAsyncChannel 发起异步调用。独立客户端使用异步 Channel 时不需要初始化 RPC Server；首次调用会创建进程内共享的客户端异步运行时，后续异步 RPC 复用其中的 IO 线程、Reactor 和协程池。
 
 ## 协程模型
 
@@ -60,6 +69,92 @@ google::protobuf::Service
 ```
 
 因此，业务和 RPC 调用代码可以保持同步写法；当 `accept`、`read`、`write`、`connect` 或 `sleep` 需要等待时，hook 层会把 fd 注册到 Reactor，并让当前子协程 `Yield`。主协程继续运行事件循环，等 epoll 通知 IO 就绪后再恢复对应子协程。
+
+### 协程池复用策略
+
+`CoroutinePool` 采用“常驻协程对象 + 可扩展栈内存”的两级复用策略：
+
+- 创建协程池时，预先创建 `pool_size` 个常驻 `Coroutine` 对象及对应的栈。这些对象保存在 `free_cors_` 中，使用完毕后通过更新占用标记反复复用。
+- 常驻协程全部占用时，协程池会从扩展 `Memory` 中分配栈，按需创建临时 `Coroutine` 对象。临时对象不加入 `free_cors_`。
+- 临时协程使用完毕后，其栈 block 会归还给扩展 `Memory`；`Coroutine` 对象在最后一个 `shared_ptr` 释放后销毁。
+- 扩展 `Memory` 也没有空闲栈时，再以 `pool_size` 个栈 block 为一批扩容。
+
+因此，`pool_size` 表示常驻协程对象的数量，同时也是栈内存的单次扩容粒度；它不是协程总数或并发数的硬上限。
+
+## RPC 调用方式
+
+### 同步调用
+
+`CrpcChannel::CallMethod()` 会在获得响应后返回。调用发生在协程中时，等待网络 IO 只会挂起当前协程。
+
+```cpp
+crpc::CrpcChannel channel(addr);
+QueryService_Stub stub(&channel);
+
+crpc::CrpcController controller;
+queryAgeReq request;
+queryAgeRes response;
+
+stub.query_age(&controller, &request, &response, nullptr);
+```
+
+### 独立客户端异步调用
+
+独立客户端可以直接构造 `CrpcAsyncChannel`，不需要调用 `InitConfig()` 或启动 `TcpServer`。`CallMethod()` 只投递异步任务并立即返回，客户端线程可以继续处理其他工作；需要结果时再调用 `wait()`。
+
+异步执行环境按需创建，并由进程内的所有 `CrpcAsyncChannel` 共享：
+
+```text
+CrpcAsyncChannel A ─┐
+CrpcAsyncChannel B ─┼──> AsyncClientRuntime
+CrpcAsyncChannel C ─┘       ├── 1 个 IOThread
+                              ├── 1 个 Reactor
+                              └── 1 个 CoroutinePool
+```
+
+- 只构造 `CrpcAsyncChannel` 不会创建线程。
+- 第一次有效调用 `CallMethod()` 时，进程会创建唯一的 `AsyncClientRuntime` 和其异步 IO 线程。
+- 后续 Channel 和异步 RPC 复用同一运行时；并发调用增加的是工作协程数量，而不是线程数量。
+
+因此，对于只有一个主线程的独立客户端，首次异步调用后通常共有两个线程：客户端主线程和共享异步 IO 线程。
+
+```cpp
+auto addr = std::make_shared<crpc::IPAddress>("127.0.0.1", 20000);
+auto controller = std::make_shared<crpc::CrpcController>();
+auto request = std::make_shared<queryAgeReq>();
+auto response = std::make_shared<queryAgeRes>();
+
+request->set_req_no(1);
+request->set_id(100);
+controller->setTimeout(5000);
+
+auto closure = std::make_shared<crpc::RpcClosure>([response]() {
+	std::cout << "RPC completed: " << response->ShortDebugString() << std::endl;
+});
+auto channel = std::make_shared<crpc::CrpcAsyncChannel>(addr);
+
+// 异步执行期间由 Channel 保持这些对象的 shared_ptr 引用
+channel->saveCallee(controller, request, response, closure);
+
+QueryService_Stub stub(channel.get());
+stub.query_age(controller.get(), request.get(), response.get(), nullptr);
+
+// CallMethod 已返回，可以执行不依赖 RPC 结果的工作
+doSomethingElse();
+
+channel->wait();
+if (controller->errorCode() != 0) {
+	std::cerr << controller->ErrorText() << std::endl;
+}
+```
+
+异步调用有以下约束：
+
+- Channel、Controller、请求、响应和 Closure 应使用 `std::shared_ptr` 管理。
+- 必须在调用 protobuf Stub 前执行 `saveCallee()`；Closure 可以传入空指针。
+- 独立客户端中的 Closure 在异步 IO 线程执行，访问其他共享状态时需要自行同步。
+- 独立客户端调用 `wait()` 会阻塞当前普通线程，但不会阻塞异步 IO 线程。
+- 在服务端 IO 协程中使用时，完成回调会返回原 IO 线程，`wait()` 只会 Yield 当前协程。
 
 ## 环境要求
 
@@ -89,6 +184,7 @@ cd <repo-dir>
 ```text
 lib/libcrpc.a
 bin/test_coroutine
+bin/test_rpc_async_client
 bin/test_rpc_server
 bin/test_rpc_server_client
 ```
@@ -121,6 +217,14 @@ cmake --build build -j$(nproc)
 ./bin/test_rpc_server_client 127.0.0.1 20000
 ```
 
+也可以运行独立异步客户端示例：
+
+```bash
+./bin/test_rpc_async_client 127.0.0.1 20000
+```
+
+该示例会验证 `CallMethod()` 立即返回、Closure 被执行以及 `wait()` 获得最终响应。
+
 运行协程调度示例：
 
 ```bash
@@ -135,7 +239,7 @@ cmake --build build -j$(nproc)
 - `server.protocol`：协议类型，当前默认使用内置二进制 RPC 编解码（配置值为 CRPC）。
 - `iothread_num`：IO 线程数量。
 - `coroutine.coroutine_stack_size`：协程栈大小，单位 KB。
-- `coroutine.coroutine_pool_size`：默认协程池大小。
+- `coroutine.coroutine_pool_size`：常驻协程数和栈内存单次扩容的 block 数，不是协程总数上限。
 - `max_connect_timeout`：客户端连接超时时间，单位秒。
 - `time_wheel.bucket_num` / `time_wheel.interval`：空闲连接清理相关参数。
 - `rpc_log_level` / `app_log_level`：RPC 日志和应用日志级别。
@@ -158,7 +262,7 @@ cmake --build build -j$(nproc)
 │   ├── rpc/           # Channel、Controller、Dispatcher、编解码和服务启动入口
 │   └── plugins/
 │       └── mysql/     # 可选 MySQL 集成
-├── testcases/         # 示例服务端、客户端、proto 和协程测试
+├── testcases/         # 示例服务端、同步/异步客户端、proto 和协程测试
 └── LICENSE
 ```
 
@@ -166,6 +270,7 @@ cmake --build build -j$(nproc)
 
 - 当前仅内置一套基于 Protobuf 的二进制 RPC 编解码实现。
 - 当前网络模型依赖 Linux epoll、eventfd 等能力。
+- 独立客户端异步调用当前复用进程内单个共享 IO 线程，通过多个协程并发执行 RPC。
 - MySQL 相关代码是可选能力，需要通过 `CRPC_ENABLE_MYSQL` 构建选项启用。
 - 项目暂不包含服务治理、注册中心、负载均衡等生产级功能。
 

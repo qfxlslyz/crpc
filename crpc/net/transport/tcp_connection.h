@@ -89,7 +89,7 @@ public:
 
 public:
 	// 服务端连接协程主循环
-	void mainServerLoopCorFunc();
+	void runServerConnectionLoop();
 
 	// 从 socket 读取数据到 read_buffer_
 	void input();
@@ -124,7 +124,7 @@ private:
 	TcpBuffer::Ptr read_buffer_;   // socket -> 应用层的读缓冲区
 	TcpBuffer::Ptr write_buffer_;  // 应用层 -> socket 的写缓冲区
 
-	Coroutine::Ptr loop_cor_;  // 服务端连接处理协程
+	Coroutine::Ptr server_conn_cor_;  // 服务端连接处理协程
 
 	Codec::Ptr codec_;	// 当前连接使用的协议编解码器
 

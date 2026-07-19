@@ -1,4 +1,5 @@
 set(HEADERS
+    crpc_async_channel.h
     crpc_channel.h
     rpc_closure.h
     crpc_controller.h

@@ -225,8 +225,9 @@ int ConnectHook(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
 		Coroutine::Resume(cur_cor);	 //这里唤醒
 	};
 
-	TimerEvent::Ptr event =
-		std::make_shared<TimerEvent>(rpc_config->max_connect_timeout_, false, timeout_cb);
+	// 独立客户端可能没有调用 InitConfig()，此时使用默认连接超时时间
+	const int max_connect_timeout = rpc_config ? rpc_config->max_connect_timeout_ : 75000;
+	TimerEvent::Ptr event = std::make_shared<TimerEvent>(max_connect_timeout, false, timeout_cb);
 
 	Timer* timer = reactor->getTimer();
 	timer->addTimerEvent(event);
@@ -249,7 +250,7 @@ int ConnectHook(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
 	}
 
 	if (is_timeout) {
-		ErrorLog << "connect error,  timeout[ " << rpc_config->max_connect_timeout_ << "ms]";
+		ErrorLog << "connect error,  timeout[ " << max_connect_timeout << "ms]";
 		errno = ETIMEDOUT;
 	}
 

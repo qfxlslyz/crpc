@@ -52,6 +52,7 @@ set(CRPC_NET_TRANSPORT_SOURCES
 )
 
 set(CRPC_RPC_SOURCES
+    crpc/rpc/crpc_async_channel.cc
     crpc/rpc/crpc_channel.cc
     crpc/rpc/rpc_codec.cc
     crpc/rpc/crpc_controller.cc
@@ -141,6 +142,15 @@ set(
 add_executable(test_rpc_server_client ${test_rpc_server_client})
 target_link_libraries(test_rpc_server_client test_rpc_proto ${LIBS})
 install(TARGETS test_rpc_server_client DESTINATION ${PATH_BIN})
+
+# test_rpc_async_client
+set(
+    test_rpc_async_client
+    ${PROJECT_SOURCE_DIR}/${PATH_TESTCASES}/test_rpc_async_client.cc
+)
+add_executable(test_rpc_async_client ${test_rpc_async_client})
+target_link_libraries(test_rpc_async_client test_rpc_proto ${LIBS})
+install(TARGETS test_rpc_async_client DESTINATION ${PATH_BIN})
 
 # test_coroutine
 set(

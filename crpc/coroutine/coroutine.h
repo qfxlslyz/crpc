@@ -16,6 +16,7 @@
 #include "crpc/base/run_time.h"
 #include "crpc/coroutine/coctx.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -48,9 +49,9 @@ public:
 
 	int getCorId() const { return cor_id_; }
 
-	void setIsInCoFunc(const bool v) { is_in_cofunc_ = v; }
+	void setIsInCoFunc(const bool v) { is_in_cofunc_.store(v); }
 
-	bool getIsInCoFunc() const { return is_in_cofunc_; }
+	bool getIsInCoFunc() const { return is_in_cofunc_.load(); }
 
 	std::string getMsgNo() { return msg_no_; }
 
@@ -88,9 +89,9 @@ private:
 	coctx coctx_;			   // 寄存器上下文，用于协程切换时保存/恢复 CPU 状态
 	int stack_size_{0};		   // 协程栈空间大小（字节）
 	char* stack_sp_{nullptr};  // 协程栈空间起始地址（由协程池的 Memory 分配）
-	bool is_in_cofunc_{false};	// 是否正在执行协程函数（true=执行中，false=已结束或未开始）
-	std::string msg_no_;  // 当前处理的请求 ID
-	RunTime run_time_;	  // 协程运行时上下文
+	std::atomic<bool> is_in_cofunc_{false};	 // 是否正在执行协程函数
+	std::string msg_no_;					 // 当前处理的请求 ID
+	RunTime run_time_;						 // 协程运行时上下文
 
 	bool can_resume_{true};	 // 是否允许被 Resume
 

@@ -29,7 +29,7 @@ TcpConnection::TcpConnection(TcpServer* tcp_svr, IOThread* io_thread, int fd, in
 	fd_event_ = FdEventContainer::getFdContainer()->getFdEvent(fd);
 	fd_event_->setReactor(reactor_);
 	initBuffer(buff_size);
-	loop_cor_ = GetCoroutinePool()->getCoroutineInstance();
+	server_conn_cor_ = GetCoroutinePool()->getCoroutineInstance();
 	state_ = kConnected;
 	DebugLog << "succ create tcp connection[" << state_ << "], fd=" << fd;
 }
@@ -54,12 +54,12 @@ TcpConnection::TcpConnection(TcpClient* tcp_cli, Reactor* reactor, int fd, int b
 void TcpConnection::initServer() {
 	// 新连接建立后先放入时间轮，再初始化连接处理协程
 	registerToTimeWheel();
-	loop_cor_->setCallBack(std::bind(&TcpConnection::mainServerLoopCorFunc, this));
+	server_conn_cor_->setCallBack(std::bind(&TcpConnection::runServerConnectionLoop, this));
 }
 
 void TcpConnection::setUpServer() {
 	// 将连接协程投递到所属 IO 线程的 Reactor 中执行
-	reactor_->addCoroutine(loop_cor_);
+	reactor_->addCoroutine(server_conn_cor_);
 }
 
 void TcpConnection::registerToTimeWheel() {
@@ -77,7 +77,7 @@ void TcpConnection::setUpClient() {
 
 TcpConnection::~TcpConnection() {
 	if (connection_type_ == kServerConnection) {
-		GetCoroutinePool()->returnCoroutine(loop_cor_);
+		GetCoroutinePool()->returnCoroutine(server_conn_cor_);
 	}
 
 	DebugLog << "~TcpConnection, fd=" << fd_;
@@ -89,7 +89,7 @@ void TcpConnection::initBuffer(int size) {
 	read_buffer_ = std::make_shared<TcpBuffer>(size);
 }
 
-void TcpConnection::mainServerLoopCorFunc() {
+void TcpConnection::runServerConnectionLoop() {
 	while (!stop_) {
 		// 每次被 IO 事件唤醒后，尽量完成读取、业务处理和响应发送
 		input();
@@ -114,7 +114,7 @@ void TcpConnection::input() {
 	bool close_flag = false;
 	int count = 0;
 	while (!read_all) {
-		// 边缘触发模型下需要一次性读到 EAGAIN，否则可能遗漏后续事件
+		// 即使在 LT 模式下，尽量一次读完数据也能减少后续 epoll_wait 的重复唤醒
 		if (read_buffer_->writeAble() == 0) {
 			read_buffer_->resizeBuffer(2 * read_buffer_->getSize());
 		}
@@ -334,7 +334,7 @@ bool TcpConnection::getOverTimerFlag() {
 }
 
 Coroutine::Ptr TcpConnection::getCoroutine() {
-	return loop_cor_;
+	return server_conn_cor_;
 }
 
 }  // namespace crpc

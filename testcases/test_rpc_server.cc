@@ -1,5 +1,4 @@
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/net/transport/net_address.h"
 #include "crpc/net/transport/tcp_server.h"
 #include "crpc/rpc/rpc_server.h"
@@ -12,7 +11,6 @@
 #include "test_rpc_server.pb.h"
 
 static int i = 0;
-crpc::CoroutineMutex g_cor_mutex;
 
 class QueryServiceImpl : public QueryService {
 public:
@@ -45,13 +43,10 @@ public:
 		response->set_id(request->id());
 		response->set_age(100100111);
 
-		// g_cor_mutex.lock();
 		AppDebugLog("begin i = %d", i);
 		sleep(1);
 		i++;
 		AppDebugLog("end i = %d", i);
-		// g_cor_mutex.unlock();
-
 		if (done) {
 			done->Run();
 		}

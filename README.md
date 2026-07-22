@@ -21,36 +21,60 @@ CRPC 采用多线程 Reactor 与用户态协程结合的协作式 M:N 模型。�
 
 ## 架构概览
 
+客户端的 Protobuf Stub 通过 `google::protobuf::RpcChannel` 发起调用。`CrpcChannel` 在当前协程中同步执行完整 RPC；`CrpcAsyncChannel` 本身不重复实现网络链路，而是先把任务投递到进程共享的 `AsyncClientRuntime`，再由其 IO 线程中的工作协程调用 `CrpcChannel`。
+
 ```text
-                         +-> CrpcChannel --------------------+
-client stub -------------+                                   |
-                         +-> CrpcAsyncChannel                |
-                               |                              |
-                               v                              |
-                         AsyncClientRuntime                   |
-                         (IOThread + Reactor + coroutine)      |
-                               |                              |
-                               +------------------------------+
-                                                              |
-                                                              v
-TcpClient / TcpConnection
-   |
-   v
-Reactor + epoll + coroutine hook
-   |
-   v
-TcpServer / IOThread
-   |
-   v
-RpcDispatcher
-   |
-   v
-google::protobuf::Service
+Protobuf Stub
+    |
+    +-- CrpcChannel ---------------------------------------------+
+    |   （同步语义：响应就绪后 CallMethod 返回）             |
+    |                                                            |
+    +-- CrpcAsyncChannel                                         |
+        （异步语义：投递任务后 CallMethod 返回）             |
+             |                                                   |
+             v                                                   |
+        AsyncClientRuntime（进程内共享）                         |
+          ├─ 1 个 IOThread + 1 个 Reactor                         |
+          └─ CoroutinePool -> 工作协程 -> CrpcChannel --------+
+                                                                  |
+                                                                  v
+                                      RpcCodec -> TcpClient -> TcpConnection
+                                                                  |
+                                               connect/read/write coroutine hook
+                                                                  |
+                                     ========== CRPC/TCP ==========
+                                                                  |
+                                                                  v
+TcpAcceptor -> MainReactor + accept 协程
+                              |
+                              | 轮询分配已接受连接
+                              v
+                         IOThreadPool
+                              |
+                              v
+                IOThread + SubReactor（每个 IO 线程一个）
+                              |
+                              v
+            TcpConnection + 连接协程（每个服务端连接一个）
+                              |
+                 input -> RpcCodec::decode
+                              |
+                              v
+                        RpcDispatcher
+                              |
+             按 service_full_name 查找 Service/Method
+                              |
+                              v
+              google::protobuf::Service::CallMethod
+                              |
+                RpcCodec::encode -> output -> TCP
 ```
 
-服务端启动后读取 XML 配置，创建 TcpServer、主 Reactor 和 IOThread。主 Reactor 负责 accept，新连接分发给 IO 线程；TcpConnection 负责读写缓冲区、内部 RPC 编解码和请求响应；RpcDispatcher 根据 `service_full_name` 查找 Protobuf Service 和 Method 并调用业务实现。
+客户端每次 `CrpcChannel` 调用都会创建本次请求使用的 `RpcCodec`、`TcpClient` 和客户端 `TcpConnection`，将 Protobuf 请求封装成 `RpcMessage` 后编码、发送，再读取响应并反序列化到业务 Response。异步 Channel 只改变调用在哪个线程/协程中执行以及完成结果如何通知，与同步 Channel 共用同一套 `CrpcChannel -> TcpClient -> TcpConnection` 网络实现。
 
-客户端可以通过 CrpcChannel 发起同步调用，也可以通过 CrpcAsyncChannel 发起异步调用。独立客户端使用异步 Channel 时不需要初始化 RPC Server；首次调用会创建进程内共享的客户端异步运行时，后续异步 RPC 复用其中的 IO 线程、Reactor 和协程池。
+服务端的 `InitConfig()` 读取 XML，创建 `RpcDispatcher`、`RpcCodec`、`TcpServer`、MainReactor 和 `IOThreadPool`。MainReactor 运行 accept 协程并处理服务端级定时任务；新连接按轮询分配到某个 IO 线程，之后固定由该线程的 SubReactor 驱动。每个服务端 `TcpConnection` 拥有一个连接协程，按 `input -> decode -> dispatch -> encode -> output` 处理请求和响应。`RpcDispatcher` 使用 `service_full_name` 定位已注册的 Protobuf Service 及 Method，并同步调用业务实现。
+
+客户端和服务端的 socket 等待都由 coroutine hook 与当前线程的 Reactor 协作：IO 暂未就绪时注册 epoll 事件并 `Yield` 当前子协程，事件就绪后由 Reactor 恢复对应协程。独立客户端使用 `CrpcAsyncChannel` 时无需初始化 RPC Server；首次有效异步调用会按需创建全进程唯一的 `AsyncClientRuntime`，后续异步 RPC 复用其 IO 线程、Reactor 和协程池。
 
 ## 协程模型
 

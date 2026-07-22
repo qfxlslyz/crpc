@@ -22,7 +22,6 @@ set(CRPC_BASE_SOURCES
     crpc/base/config.cc
     crpc/base/log.cc
     crpc/base/msg_req.cc
-    crpc/base/mutex.cc
     crpc/base/string_util.cc
     crpc/base/thread_pool.cc
 )

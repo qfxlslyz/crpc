@@ -1,5 +1,6 @@
 #include "crpc/base/error_code.h"
 #include "crpc/base/msg_req.h"
+#include "crpc/coroutine/coroutine.h"
 #include "crpc/net/protocol/codec.h"
 #include "crpc/net/protocol/dispatcher.h"
 #include "crpc/net/transport/tcp_buffer.h"

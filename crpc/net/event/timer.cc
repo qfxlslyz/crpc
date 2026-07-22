@@ -50,7 +50,7 @@ void Timer::addTimerEvent(TimerEvent::Ptr event, bool need_reset /*=true*/) {
 		is_reset = true;
 	} else {
 		auto it = pending_events_.begin();
-		if (event->arrive_time_ < (*it).second->arrive_time_) {
+		if (event->arrive_time_ < it->second->arrive_time_) {
 			is_reset = true;
 		}
 	}

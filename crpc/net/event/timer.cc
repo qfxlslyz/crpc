@@ -1,5 +1,4 @@
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine_hook.h"
 #include "crpc/net/event/fd_event.h"
 #include "crpc/net/event/timer.h"
@@ -43,7 +42,7 @@ Timer::~Timer() {
 }
 
 void Timer::addTimerEvent(TimerEvent::Ptr event, bool need_reset /*=true*/) {
-	RWMutex::WriteScopedLock lock(event_mutex_);
+	std::unique_lock<std::shared_mutex> lock(event_mutex_);
 	bool is_reset = false;
 	// 如果新事件比当前最近事件更早，需要重新设置 timerfd 到期时间
 	if (pending_events_.empty()) {
@@ -67,7 +66,7 @@ void Timer::delTimerEvent(TimerEvent::Ptr event) {
 	// 先标记取消，即使当前未能从 multimap 找到，也可避免稍后被执行
 	event->is_canceled_ = true;
 
-	RWMutex::WriteScopedLock lock(event_mutex_);
+	std::unique_lock<std::shared_mutex> lock(event_mutex_);
 	auto begin = pending_events_.lower_bound(event->arrive_time_);
 	auto end = pending_events_.upper_bound(event->arrive_time_);
 	auto it = begin;
@@ -85,7 +84,7 @@ void Timer::delTimerEvent(TimerEvent::Ptr event) {
 }
 
 void Timer::resetArriveTime() {
-	RWMutex::ReadScopedLock lock(event_mutex_);
+	std::shared_lock<std::shared_mutex> lock(event_mutex_);
 	std::multimap<int64_t, TimerEvent::Ptr> tmp = pending_events_;
 	lock.unlock();
 
@@ -129,7 +128,7 @@ void Timer::onTimer() {
 	}
 
 	int64_t now = GetNowMs();
-	RWMutex::WriteScopedLock lock(event_mutex_);
+	std::unique_lock<std::shared_mutex> lock(event_mutex_);
 	auto it = pending_events_.begin();
 	std::vector<TimerEvent::Ptr> tmps;
 	std::vector<std::pair<int64_t, std::function<void()>>> tasks;

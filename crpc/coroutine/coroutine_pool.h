@@ -17,10 +17,10 @@
 #ifndef CRPC_COROUTINE_COROUTINE_POOL_H_
 #define CRPC_COROUTINE_COROUTINE_POOL_H_
 
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 #include "crpc/coroutine/memory.h"
 
+#include <mutex>
 #include <vector>
 
 namespace crpc {
@@ -43,7 +43,7 @@ private:
 	// 仅保存初始常驻协程: first=协程指针, second=是否被占用
 	std::vector<std::pair<Coroutine::Ptr, bool>> free_cors_;
 
-	Mutex mutex_;
+	std::mutex mutex_;
 
 	// memory_pool_[0] 专属于常驻协程，后续 Memory 为临时协程提供可复用栈
 	std::vector<Memory::Ptr> memory_pool_;

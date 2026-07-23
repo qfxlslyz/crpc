@@ -1,6 +1,5 @@
 #include "crpc/base/config.h"
 #include "crpc/coroutine/coroutine.h"
-#include "crpc/coroutine/coroutine_pool.h"
 #include "crpc/net/event/reactor.h"
 #include "crpc/net/transport/io_thread.h"
 #include "crpc/net/transport/tcp_connection.h"
@@ -9,42 +8,35 @@
 
 #include <map>
 #include <memory>
-#include <stdlib.h>
-#include <time.h>
-
-#include <semaphore.h>
 
 namespace crpc {
 
 extern Config::Ptr rpc_config;
 
-static thread_local Reactor* t_reactor_ptr = nullptr;
-
 static thread_local IOThread* t_cur_io_thread = nullptr;
 
 IOThread::IOThread() {
-	// 两个信号量分别用于“线程初始化完成”和“允许线程开始 loop”的同步
-	int rt = sem_init(&init_semaphore_, 0, 0);
-	assert(rt == 0);
+	thread_ = std::thread(&IOThread::main, this);
 
-	rt = sem_init(&start_semaphore_, 0, 0);
-	assert(rt == 0);
-
-	pthread_create(&thread_, nullptr, &IOThread::main, this);
-
-	DebugLog << "semaphore begin to wait until new thread frinish "
+	DebugLog << "wait until new thread finishes "
 				"IOThread::main() to init";
-	// 等待新线程完成 IOThread::main() 初始化
-	rt = sem_wait(&init_semaphore_);
-	assert(rt == 0);
-	DebugLog << "semaphore wait end, finish create io thread";
-
-	sem_destroy(&init_semaphore_);
+	std::unique_lock<std::mutex> lock(state_mutex_);
+	state_condition_.wait(lock, [this]() { return initialized_; });
+	DebugLog << "finish create io thread";
 }
 
 IOThread::~IOThread() {
-	reactor_->stop();
-	pthread_join(thread_, nullptr);
+	{
+		std::lock_guard<std::mutex> lock(state_mutex_);
+		stopping_ = true;
+	}
+	if (reactor_) {
+		reactor_->stop();
+	}
+	state_condition_.notify_all();
+	if (thread_.joinable()) {
+		thread_.join();
+	}
 
 	if (reactor_ != nullptr) {
 		delete reactor_;
@@ -56,16 +48,23 @@ IOThread* IOThread::getCurrentIOThread() {
 	return t_cur_io_thread;
 }
 
-sem_t* IOThread::getStartSemaphore() {
-	return &start_semaphore_;
-}
-
 Reactor* IOThread::getReactor() {
 	return reactor_;
 }
 
-pthread_t IOThread::getPthreadId() {
-	return thread_;
+std::thread::id IOThread::getThreadId() const {
+	return thread_.get_id();
+}
+
+void IOThread::start() {
+	{
+		std::lock_guard<std::mutex> lock(state_mutex_);
+		if (started_ || stopping_) {
+			return;
+		}
+		started_ = true;
+	}
+	state_condition_.notify_all();
 }
 
 void IOThread::setThreadIndex(const int index) {
@@ -76,33 +75,30 @@ int IOThread::getThreadIndex() {
 	return index_;
 }
 
-void* IOThread::main(void* arg) {
-	// assert(t_reactor_ptr == nullptr);
+void IOThread::main() {
+	Reactor* reactor = new Reactor();
+	assert(reactor != nullptr);
 
-	t_reactor_ptr = new Reactor();
-	assert(t_reactor_ptr != nullptr);
-
-	IOThread* thread = static_cast<IOThread*>(arg);
 	// Reactor 只能在线程内部创建并绑定到该线程，后续 epoll 操作才有明确归属
-	t_cur_io_thread = thread;
-	thread->reactor_ = t_reactor_ptr;
-	thread->reactor_->setReactorType(SubReactor);
-	thread->tid_ = GetTid();
+	t_cur_io_thread = this;
+	reactor_ = reactor;
+	reactor_->setReactorType(SubReactor);
+	tid_ = GetTid();
 
 	Coroutine::getCurrentCoroutine();
 
-	DebugLog << "finish iothread init, now post semaphore";
-	sem_post(&thread->init_semaphore_);
+	{
+		std::unique_lock<std::mutex> lock(state_mutex_);
+		initialized_ = true;
+		state_condition_.notify_all();
+		state_condition_.wait(lock, [this]() { return started_ || stopping_; });
+		if (stopping_) {
+			return;
+		}
+	}
 
-	// 等待主线程投递 start_semaphore_ 后启动 IOThread 事件循环
-	sem_wait(&thread->start_semaphore_);
-
-	sem_destroy(&thread->start_semaphore_);
-
-	DebugLog << "IOThread " << thread->tid_ << " begin to loop";
-	t_reactor_ptr->loop();
-
-	return nullptr;
+	DebugLog << "IOThread " << tid_ << " begin to loop";
+	reactor->loop();
 }
 
 void IOThread::addClient(TcpConnection* tcp_conn) {
@@ -123,8 +119,7 @@ IOThreadPool::IOThreadPool(int size) : size_(size) {
 
 void IOThreadPool::start() {
 	for (int i = 0; i < size_; ++i) {
-		int rt = sem_post(io_threads_[i]->getStartSemaphore());
-		assert(rt == 0);
+		io_threads_[i]->start();
 	}
 }
 
@@ -150,63 +145,6 @@ void IOThreadPool::broadcastTask(std::function<void()> cb) {
 void IOThreadPool::addTaskByIndex(int index, std::function<void()> cb) {
 	if (index >= 0 && index < size_) {
 		io_threads_[index]->getReactor()->addTask(cb, true);
-	}
-}
-
-void IOThreadPool::addCoroutineToRandomThread(Coroutine::Ptr cor, bool self /* = false*/) {
-	if (size_ == 1) {
-		io_threads_[0]->getReactor()->addCoroutine(cor, true);
-		return;
-	}
-	srand(time(0));
-	int i = 0;
-	while (1) {
-		i = rand() % (size_);
-		// self=false 时尽量避免把协程投递回当前 IO 线程，减少重入风险
-		if (!self && io_threads_[i]->getPthreadId() == t_cur_io_thread->getPthreadId()) {
-			i++;
-			if (i == size_) {
-				i -= 2;
-			}
-		}
-		break;
-	}
-	io_threads_[i]->getReactor()->addCoroutine(cor, true);
-	// if (io_threads_[index_]->getPthreadId() ==
-	// t_cur_io_thread->getPthreadId())
-	// {
-	//   index_++;
-	//   if (index_ == size_ || index_ == -1) {
-	//     index_ = 0;
-	//   }
-	// }
-}
-
-Coroutine::Ptr IOThreadPool::addCoroutineToRandomThread(std::function<void()> cb,
-														bool self /* = false*/) {
-	Coroutine::Ptr cor = GetCoroutinePool()->getCoroutineInstance();
-	cor->setCallBack(cb);
-	addCoroutineToRandomThread(cor, self);
-	return cor;
-}
-
-Coroutine::Ptr IOThreadPool::addCoroutineToThreadByIndex(int index, std::function<void()> cb,
-														 bool self /* = false*/) {
-	if (index >= (int)io_threads_.size() || index < 0) {
-		ErrorLog << "addCoroutineToThreadByIndex error, invalid iothread index[" << index << "]";
-		return nullptr;
-	}
-	Coroutine::Ptr cor = GetCoroutinePool()->getCoroutineInstance();
-	cor->setCallBack(cb);
-	io_threads_[index]->getReactor()->addCoroutine(cor, true);
-	return cor;
-}
-
-void IOThreadPool::addCoroutineToEachThread(std::function<void()> cb) {
-	for (auto i : io_threads_) {
-		Coroutine::Ptr cor = GetCoroutinePool()->getCoroutineInstance();
-		cor->setCallBack(cb);
-		i->getReactor()->addCoroutine(cor, true);
 	}
 }
 

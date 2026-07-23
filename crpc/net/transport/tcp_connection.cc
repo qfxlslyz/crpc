@@ -7,6 +7,7 @@
 #include "crpc/net/transport/tcp_server.h"
 #include "crpc/net/transport/timeout_slot.h"
 
+#include <utility>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -93,9 +94,10 @@ void TcpConnection::runServerConnectionLoop() {
 	while (!stop_) {
 		// 每次被 IO 事件唤醒后，尽量完成读取、业务处理和响应发送
 		input();
-
+		if (stop_) {
+			break;
+		}
 		execute();
-
 		output();
 	}
 	InfoLog << "this connection has already end loop";
@@ -160,11 +162,8 @@ void TcpConnection::input() {
 	}
 	if (close_flag) {
 		clearClient();
-		// fd 已关闭，当前协程不能再次被 Reactor 恢复，等待主线程清理连接对象
-		DebugLog << "peer close, now yield current coroutine, wait main thread "
-					"clear this TcpConnection";
-		Coroutine::getCurrentCoroutine()->setCanResume(false);
-		Coroutine::Yield();
+		DebugLog << "peer close, stop current connection coroutine";
+		return;
 	}
 
 	if (is_over_time_) {
@@ -260,6 +259,14 @@ void TcpConnection::clearClient() {
 		DebugLog << "this client has closed";
 		return;
 	}
+
+	// close 后 fd 可能立即被系统复用；在 MainReactor 用新连接替换 clients_[fd]
+	// 之前先持有自身，保证当前协程完成退出后再释放旧连接
+	TcpConnection::Ptr self;
+	if (connection_type_ == kServerConnection) {
+		self = shared_from_this();
+	}
+
 	// 先注销 epoll 事件，避免关闭后的 fd 继续触发旧事件
 	fd_event_->unregisterFromReactor();
 
@@ -268,21 +275,41 @@ void TcpConnection::clearClient() {
 
 	close(fd_event_->getFd());
 	setState(kClosed);
+
+	if (connection_type_ == kServerConnection) {
+		reactor_->addTask(
+			[self = std::move(self)]() mutable {
+				TcpServer* server = self->tcp_svr_;
+				const int fd = self->fd_;
+				server->removeClient(fd, std::move(self));
+			},
+			false);
+	}
 }
 
 void TcpConnection::shutdownConnection() {
-	TcpConnectionState state = getState();
-	if (state == kClosed || state == kNotConnected) {
+	if (connection_type_ == kServerConnection && IOThread::getCurrentIOThread() != io_thread_) {
+		TcpConnection::Ptr self = shared_from_this();
+		reactor_->addTask([self]() { self->shutdownConnectionInLoop(); }, true);
+		return;
+	}
+
+	shutdownConnectionInLoop();
+}
+
+void TcpConnection::shutdownConnectionInLoop() {
+	TcpConnectionState expected = kConnected;
+	if (!state_.compare_exchange_strong(expected, kHalfClosing)) {
 		DebugLog << "this client has closed";
 		return;
 	}
-	setState(kHalfClosing);
+
 	InfoLog << "shutdown conn[" << peer_addr_->toString() << "], fd=" << fd_;
 	// 调用系统 shutdown 发送 FIN
 	// 等待客户端处理完后发送 FIN
 	// 随后 fd 会产生可读事件，但读取到的字节数为 0
 	// 然后调用 clearClient 将状态设置为 CLOSED
-	// IOThread::MainLoopTimerFunc 会删除 CLOSED 状态的连接
+	// 连接协程退出后，IO 线程会通知 MainReactor 移除对象
 	shutdown(fd_event_->getFd(), SHUT_RDWR);
 }
 
@@ -311,18 +338,11 @@ Codec::Ptr TcpConnection::getCodec() const {
 }
 
 TcpConnectionState TcpConnection::getState() {
-	TcpConnectionState state;
-	RWMutex::ReadScopedLock lock(mutex_);
-	state = state_;
-	lock.unlock();
-
-	return state;
+	return state_.load();
 }
 
 void TcpConnection::setState(const TcpConnectionState& state) {
-	RWMutex::WriteScopedLock lock(mutex_);
-	state_ = state;
-	lock.unlock();
+	state_.store(state);
 }
 
 void TcpConnection::setOverTimeFlag(bool value) {

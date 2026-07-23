@@ -1,13 +1,17 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.8)
 project(crpc)
 
 SET(CMAKE_INSTALL_PREFIX ${PROJECT_SOURCE_DIR})
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_language(ASM)
+enable_testing()
 
 option(CRPC_ENABLE_MYSQL "Build CRPC with the optional MySQL plugin" OFF)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0 -std=c++11 -Wall -Wno-deprecated -Wno-unused-but-set-variable")
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0 -Wall -Wno-deprecated -Wno-unused-but-set-variable")
 
 set(PATH_LIB lib)
 set(PATH_BIN bin)
@@ -75,6 +79,9 @@ add_library(crpc
     ${CRPC_PLUGIN_SOURCES}
 )
 
+find_package(Threads REQUIRED)
+target_link_libraries(crpc PUBLIC Threads::Threads)
+
 if (CRPC_ENABLE_MYSQL)
     target_compile_definitions(crpc PUBLIC DECLARE_MYSQL_PLUGIN)
     find_library(MYSQLCLIENT_LIBRARY mysqlclient)
@@ -115,7 +122,6 @@ set(LIBS
     ${Protobuf_LIBRARY}
     ${tinyxml}
     dl
-    pthread
 )
 
 if (CRPC_ENABLE_MYSQL)
@@ -159,6 +165,8 @@ set(
 add_executable(test_coroutine ${test_coroutine})
 target_link_libraries(test_coroutine ${LIBS})
 install(TARGETS test_coroutine DESTINATION ${PATH_BIN})
+
+add_test(NAME coroutine_scheduling COMMAND test_coroutine)
 
 # install *.h
 add_subdirectory(crpc/base)

@@ -10,14 +10,16 @@
 #define CRPC_NET_EVENT_TIMER_H_
 
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/net/event/fd_event.h"
 #include "crpc/net/event/reactor.h"
 
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <time.h>
+
+#include <shared_mutex>
 
 namespace crpc {
 
@@ -84,7 +86,7 @@ public:
 private:
 	// 按触发时间排序的定时事件集合（multimap 支持同一时刻多个事件）
 	std::multimap<int64_t, TimerEvent::Ptr> pending_events_;
-	RWMutex event_mutex_;
+	std::shared_mutex event_mutex_;
 };
 
 }  // namespace crpc

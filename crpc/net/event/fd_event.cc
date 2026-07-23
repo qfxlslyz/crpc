@@ -5,8 +5,6 @@
 
 namespace crpc {
 
-static FdEventContainer* g_FdContainer = nullptr;
-
 FdEvent::FdEvent(Reactor* reactor, int fd /*=-1*/) : fd_(fd), reactor_(reactor) {
 	if (reactor == nullptr) {
 		ErrorLog << "create reactor first";
@@ -157,7 +155,7 @@ Coroutine* FdEvent::getCoroutine() {
 
 FdEvent::Ptr FdEventContainer::getFdEvent(int fd) {
 	// fd 值通常较小，优先读锁快速命中已有对象
-	RWMutex::ReadScopedLock rlock(mutex_);
+	std::shared_lock<std::shared_mutex> rlock(mutex_);
 	if (fd < static_cast<int>(fds_.size())) {
 		FdEvent::Ptr re = fds_[fd];
 		rlock.unlock();
@@ -166,7 +164,7 @@ FdEvent::Ptr FdEventContainer::getFdEvent(int fd) {
 	rlock.unlock();
 
 	// 容器不够大时按比例扩容，确保 fds_[fd] 可直接索引
-	RWMutex::WriteScopedLock wlock(mutex_);
+	std::unique_lock<std::shared_mutex> wlock(mutex_);
 	int n = (int)(fd * 1.5);
 	for (int i = fds_.size(); i < n; ++i) {
 		fds_.push_back(std::make_shared<FdEvent>(i));
@@ -183,10 +181,8 @@ FdEventContainer::FdEventContainer(int size) {
 }
 
 FdEventContainer* FdEventContainer::getFdContainer() {
-	if (g_FdContainer == nullptr) {
-		g_FdContainer = new FdEventContainer(1000);
-	}
-	return g_FdContainer;
+	static FdEventContainer container(1000);
+	return &container;
 }
 
 }  // namespace crpc

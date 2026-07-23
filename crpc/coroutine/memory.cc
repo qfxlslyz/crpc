@@ -20,7 +20,6 @@ Memory::Memory(int block_size, int block_count)
 	for (size_t i = 0; i < blocks_.size(); ++i) {
 		blocks_[i] = false;
 	}
-	ref_counts_ = 0;
 }
 
 // void Memory::free() {
@@ -33,7 +32,6 @@ Memory::Memory(int block_size, int block_count)
 //   }
 //   InfoLog << "~succ free munmap " << size_ << " bytes memory";
 //   start_ = nullptr;
-//   ref_counts_ = 0;
 // }
 
 Memory::~Memory() {
@@ -43,7 +41,6 @@ Memory::~Memory() {
 	free(start_);
 	InfoLog << "~succ free munmap " << size_ << " bytes memory";
 	start_ = nullptr;
-	ref_counts_ = 0;
 }
 
 char* Memory::getStart() {
@@ -54,25 +51,22 @@ char* Memory::getEnd() {
 	return end_;
 }
 
-int Memory::getRefCount() {
-	return ref_counts_;
-}
-
 char* Memory::getBlock() {
 	int t = -1;
-	Mutex::ScopedLock lock(mutex_);
-	for (size_t i = 0; i < blocks_.size(); ++i) {
-		if (blocks_[i] == false) {
-			blocks_[i] = true;
-			t = i;
-			break;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		for (size_t i = 0; i < blocks_.size(); ++i) {
+			if (blocks_[i] == false) {
+				blocks_[i] = true;
+				t = i;
+				break;
+			}
 		}
 	}
-	lock.unlock();
+	
 	if (t == -1) {
 		return nullptr;
 	}
-	ref_counts_++;
 	return start_ + (t * block_size_);
 }
 
@@ -82,10 +76,8 @@ void Memory::backBlock(char* s) {
 		return;
 	}
 	int i = (s - start_) / block_size_;
-	Mutex::ScopedLock lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	blocks_[i] = false;
-	lock.unlock();
-	ref_counts_--;
 }
 
 bool Memory::hasBlock(char* s) {

@@ -1,6 +1,5 @@
 #include "crpc/base/config.h"
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 #include "crpc/coroutine/coroutine_pool.h"
 
@@ -47,7 +46,7 @@ Coroutine::Ptr CoroutinePool::getCoroutineInstance() {
 	// 而未使用的协程只有 mmap 得到的虚拟地址，还没有真正写入物理内存
 	// 因此 Linux 会在首次写入时分配物理页，并触发缺页中断
 
-	Mutex::ScopedLock lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	for (int i = 0; i < pool_size_; ++i) {
 		if (!free_cors_[i].first->getIsInCoFunc() && !free_cors_[i].second) {
 			free_cors_[i].second = true;
@@ -74,7 +73,7 @@ Coroutine::Ptr CoroutinePool::getCoroutineInstance() {
 }
 
 void CoroutinePool::returnCoroutine(Coroutine::Ptr cor) {
-	Mutex::ScopedLock lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	int i = cor->getIndex();
 	if (i >= 0 && i < pool_size_) {
 		// 常驻协程对象及其栈均保留，只释放占用标记

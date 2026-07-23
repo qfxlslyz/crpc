@@ -2,7 +2,6 @@
 #define CRPC_NET_TRANSPORT_TCP_CONNECTION_H_
 
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 #include "crpc/net/event/fd_event.h"
 #include "crpc/net/event/reactor.h"
@@ -14,6 +13,7 @@
 #include "crpc/net/transport/tcp_connection_time_wheel.h"
 #include "crpc/net/transport/timeout_slot.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <queue>
@@ -109,6 +109,9 @@ public:
 private:
 	void clearClient();
 
+	// 仅在连接所属的 IO 线程执行状态转换和 shutdown，避免与 close 并发。
+	void shutdownConnectionInLoop();
+
 private:
 	TcpServer* tcp_svr_{nullptr};
 	TcpClient* tcp_cli_{nullptr};
@@ -116,7 +119,7 @@ private:
 	Reactor* reactor_{nullptr};
 
 	int fd_{-1};
-	TcpConnectionState state_{TcpConnectionState::kConnected};
+	std::atomic<TcpConnectionState> state_{kConnected};
 	ConnectionType connection_type_{kServerConnection};
 
 	NetAddress::Ptr peer_addr_;
@@ -137,8 +140,6 @@ private:
 	std::map<std::string, ProtocolMessage::Ptr> reply_datas_;  // 客户端侧 msg_req -> 响应包
 
 	std::weak_ptr<TimeoutSlot<TcpConnection>> weak_slot_;  // 时间轮槽位，弱引用避免循环持有
-
-	RWMutex mutex_;
 };
 
 }  // namespace crpc

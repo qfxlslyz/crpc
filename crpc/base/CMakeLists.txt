@@ -3,7 +3,6 @@ set(HEADERS
     error_code.h
     log.h
     msg_req.h
-    mutex.h
     run_time.h
     string_util.h
     thread_pool.h

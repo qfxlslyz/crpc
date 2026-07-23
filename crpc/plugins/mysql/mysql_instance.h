@@ -5,11 +5,11 @@
 #include <mysql/mysql.h>
 #endif
 
-#include "crpc/base/mutex.h"
 #include "crpc/net/transport/net_address.h"
 
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace crpc {
 
@@ -73,7 +73,7 @@ private:
 	MySQLOption option_;
 	bool init_succ_{false};
 	bool in_trans_{false};
-	Mutex mutex_;
+	std::mutex mutex_;
 	MYSQL* sql_handler_{nullptr};
 };
 

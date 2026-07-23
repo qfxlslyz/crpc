@@ -1,5 +1,4 @@
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 #include "crpc/coroutine/coroutine_hook.h"
 #include "crpc/net/event/fd_event.h"
@@ -7,6 +6,7 @@
 #include "crpc/net/event/timer.h"
 
 #include <algorithm>
+#include <utility>
 #include <assert.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -84,8 +84,8 @@ void Reactor::addEvent(int fd, epoll_event event, bool is_wakeup /*=true*/) {
 	}
 	{
 		// 跨线程操作先进入 pending 队列，由 loop 线程统一执行 epoll_ctl
-		Mutex::ScopedLock lock(mutex_);
-		pending_add_fds_.insert(std::pair<int, epoll_event>(fd, event));
+		std::lock_guard<std::mutex> lock(mutex_);
+		pending_add_fds_.emplace(fd, event);
 	}
 	if (is_wakeup) {
 		wakeup();
@@ -107,7 +107,7 @@ void Reactor::delEvent(int fd, bool is_wakeup /*=true*/) {
 
 	{
 		// 跨线程删除同样排队，保证 epoll_ctl 都发生在 Reactor 所属线程
-		Mutex::ScopedLock lock(mutex_);
+		std::lock_guard<std::mutex> lock(mutex_);
 		pending_del_fds_.push_back(fd);
 	}
 	if (is_wakeup) {
@@ -116,7 +116,7 @@ void Reactor::delEvent(int fd, bool is_wakeup /*=true*/) {
 }
 
 void Reactor::wakeup() {
-	if (!is_looping_) {
+	if (!is_looping_.load()) {
 		return;
 	}
 
@@ -199,22 +199,21 @@ void Reactor::delEventInLoopThread(int fd) {
 
 void Reactor::loop() {
 	assert(isLoopThread());
-	if (is_looping_) {
+	if (is_looping_.exchange(true)) {
 		return;
 	}
 
-	is_looping_ = true;
-	stop_flag_ = false;
-
-	while (!stop_flag_) {
+	while (!stop_flag_.load()) {
 		const int MAX_EVENTS = 100;
 		epoll_event re_events[MAX_EVENTS + 1];
 
 		// 执行外部线程投递的普通任务，例如添加协程、刷新时间轮等
-		Mutex::ScopedLock lock(mutex_);
+		
 		std::vector<std::function<void()>> tmp_tasks;
-		tmp_tasks.swap(pending_tasks_);
-		lock.unlock();
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			tmp_tasks.swap(pending_tasks_);
+		}
 
 		for (size_t i = 0; i < tmp_tasks.size(); ++i) {
 			if (tmp_tasks[i]) {
@@ -281,11 +280,11 @@ void Reactor::loop() {
 			if (one_event.events & EPOLLIN) {
 				// 普通回调放入任务队列，避免在 epoll
 				// 事件遍历中执行过重逻辑
-				Mutex::ScopedLock lock(mutex_);
+				std::lock_guard<std::mutex> lock(mutex_);
 				pending_tasks_.push_back(read_cb);
 			}
 			if (one_event.events & EPOLLOUT) {
-				Mutex::ScopedLock lock(mutex_);
+				std::lock_guard<std::mutex> lock(mutex_);
 				pending_tasks_.push_back(write_cb);
 			}
 		}
@@ -294,7 +293,7 @@ void Reactor::loop() {
 		std::vector<int> tmp_del;
 
 		{
-			Mutex::ScopedLock lock(mutex_);
+			std::lock_guard<std::mutex> lock(mutex_);
 			// 将本轮积累的 epoll 变更取出，统一在 Reactor 线程执行
 			tmp_add.swap(pending_add_fds_);
 			pending_add_fds_.clear();
@@ -314,12 +313,11 @@ void Reactor::loop() {
 		}
 	}
 	DebugLog << "reactor loop end";
-	is_looping_ = false;
+	is_looping_.store(false);
 }
 
 void Reactor::stop() {
-	if (!stop_flag_ && is_looping_) {
-		stop_flag_ = true;
+	if (!stop_flag_.exchange(true)) {
 		wakeup();
 	}
 }
@@ -327,8 +325,8 @@ void Reactor::stop() {
 void Reactor::addTask(std::function<void()> task, bool is_wakeup /*=true*/) {
 	{
 		// 任务可能来自任意线程，因此统一加锁后交给 loop 线程执行
-		Mutex::ScopedLock lock(mutex_);
-		pending_tasks_.push_back(task);
+		std::lock_guard<std::mutex> lock(mutex_);
+		pending_tasks_.push_back(std::move(task));
 	}
 	if (is_wakeup) {
 		wakeup();
@@ -341,7 +339,7 @@ void Reactor::addTask(std::vector<std::function<void()>> task, bool is_wakeup /*
 	}
 
 	{
-		Mutex::ScopedLock lock(mutex_);
+		std::lock_guard<std::mutex> lock(mutex_);
 		pending_tasks_.insert(pending_tasks_.end(), task.begin(), task.end());
 	}
 	if (is_wakeup) {

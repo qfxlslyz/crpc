@@ -13,8 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <semaphore.h>
-
 #ifdef DECLARE_MYSQL_PLUGIN
 #include <mysql/mysql.h>
 #endif
@@ -35,12 +33,8 @@ static std::atomic_int64_t g_rpc_log_index{0};
 static std::atomic_int64_t g_app_log_index{0};
 
 void CoredumpHandler(int signal_no) {
-	ErrorLog << "progress received invalid signal, will exit";
-	printf("progress received invalid signal, will exit\n");
-	rpc_logger->flush();
-	pthread_join(rpc_logger->getAsyncLogger()->thread_, nullptr);
-	pthread_join(rpc_logger->getAsyncAppLogger()->thread_, nullptr);
-
+	static const char message[] = "process received signal, will exit\n";
+	syscall(SYS_write, STDERR_FILENO, message, sizeof(message) - 1);
 	signal(signal_no, SIG_DFL);
 	raise(signal_no);
 }
@@ -210,8 +204,6 @@ Logger::Logger() {
 
 Logger::~Logger() {
 	flush();
-	pthread_join(async_rpc_logger_->thread_, nullptr);
-	pthread_join(async_app_logger_->thread_, nullptr);
 }
 
 Logger* Logger::getLogger() {
@@ -234,7 +226,6 @@ void Logger::init(const char* file_name, const char* file_path, int max_size, in
 		signal(SIGSEGV, CoredumpHandler);
 		signal(SIGABRT, CoredumpHandler);
 		signal(SIGTERM, CoredumpHandler);
-		signal(SIGKILL, CoredumpHandler);
 		signal(SIGINT, CoredumpHandler);
 		signal(SIGSTKFLT, CoredumpHandler);
 
@@ -252,73 +243,67 @@ void Logger::start() {
 
 void Logger::loopFunc() {
 	std::vector<std::string> app_tmp;
-	Mutex::ScopedLock lock1(app_buff_mutex_);
-	app_tmp.swap(app_buffer_);
-	lock1.unlock();
+	{
+		std::lock_guard<std::mutex> lock(app_buff_mutex_);
+		app_tmp.swap(app_buffer_);
+	}
 
 	std::vector<std::string> tmp;
-	Mutex::ScopedLock lock2(buff_mutex_);
-	tmp.swap(buffer_);
-	lock2.unlock();
+	{
+		std::lock_guard<std::mutex> lock(buff_mutex_);
+		tmp.swap(buffer_);
+	}
 
 	async_rpc_logger_->push(tmp);
 	async_app_logger_->push(app_tmp);
 }
 
 void Logger::pushRpcLog(const std::string& msg) {
-	Mutex::ScopedLock lock(buff_mutex_);
+	std::lock_guard<std::mutex> lock(buff_mutex_);
 	buffer_.push_back(std::move(msg));
-	lock.unlock();
 }
 
 void Logger::pushAppLog(const std::string& msg) {
-	Mutex::ScopedLock lock(app_buff_mutex_);
+	std::lock_guard<std::mutex> lock(app_buff_mutex_);
 	app_buffer_.push_back(std::move(msg));
-	lock.unlock();
 }
 
 void Logger::flush() {
+	if (!async_rpc_logger_ || !async_app_logger_) {
+		return;
+	}
 	loopFunc();
 	async_rpc_logger_->stop();
-	async_rpc_logger_->flush();
-
 	async_app_logger_->stop();
-	async_app_logger_->flush();
+	async_rpc_logger_->join();
+	async_app_logger_->join();
 }
 
 AsyncLogger::AsyncLogger(const char* file_name, const char* file_path, int max_size,
 						 LogType logtype)
-	: file_name_(file_name), file_path_(file_path), max_size_(max_size), log_type_(logtype) {
-	int rt = sem_init(&semaphore_, 0, 0);
-	assert(rt == 0);
+	: file_name_(file_name),
+	  file_path_(file_path),
+	  max_size_(max_size),
+	  log_type_(logtype),
+	  thread_(&AsyncLogger::execute, this) {}
 
-	rt = pthread_create(&thread_, nullptr, &AsyncLogger::execute, this);
-	assert(rt == 0);
-	rt = sem_wait(&semaphore_);
-	assert(rt == 0);
+AsyncLogger::~AsyncLogger() {
+	stop();
+	join();
 }
 
-AsyncLogger::~AsyncLogger() {}
-
-void* AsyncLogger::execute(void* arg) {
-	AsyncLogger* ptr = reinterpret_cast<AsyncLogger*>(arg);
-	int rt = pthread_cond_init(&ptr->condition_, nullptr);
-	assert(rt == 0);
-
-	rt = sem_post(&ptr->semaphore_);
-	assert(rt == 0);
-
-	while (1) {
-		Mutex::ScopedLock lock(ptr->mutex_);
-
-		while (ptr->tasks_.empty() && !ptr->stop_) {
-			pthread_cond_wait(&(ptr->condition_), ptr->mutex_.getMutex());
-		}
+void AsyncLogger::execute() {
+	while (true) {
 		std::vector<std::string> tmp;
-		tmp.swap(ptr->tasks_.front());
-		ptr->tasks_.pop();
-		bool is_stop = ptr->stop_;
-		lock.unlock();
+		{
+			std::unique_lock<std::mutex> lock(mutex_);
+			condition_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
+			if (tasks_.empty()) {
+				break;
+			}
+			tmp = std::move(tasks_.front());
+			tasks_.pop();
+		}
 
 		timeval now;
 		gettimeofday(&now, nullptr);
@@ -329,91 +314,107 @@ void* AsyncLogger::execute(void* arg) {
 		const char* format = "%Y%m%d";
 		char date[32];
 		strftime(date, sizeof(date), format, &now_time);
-		if (ptr->date_ != std::string(date)) {
+		std::lock_guard<std::mutex> file_lock(file_mutex_);
+		if (date_ != std::string(date)) {
 			// 跨天
 			// 重置 no_ 和 date_
-			ptr->no_ = 0;
-			ptr->date_ = std::string(date);
-			ptr->need_reopen_ = true;
+			no_ = 0;
+			date_ = std::string(date);
+			need_reopen_ = true;
 		}
 
-		if (!ptr->file_handle_) {
-			ptr->need_reopen_ = true;
+		if (!file_handle_) {
+			need_reopen_ = true;
 		}
 
 		std::stringstream ss;
-		ss << ptr->file_path_ << ptr->file_name_ << "_" << ptr->date_ << "_"
-		   << LogTypeToString(ptr->log_type_) << "_" << ptr->no_ << ".log";
+		ss << file_path_ << file_name_ << "_" << date_ << "_" << LogTypeToString(log_type_) << "_"
+		   << no_ << ".log";
 		std::string full_file_name = ss.str();
 
-		if (ptr->need_reopen_) {
-			if (ptr->file_handle_) {
-				fclose(ptr->file_handle_);
+		if (need_reopen_) {
+			if (file_handle_) {
+				fclose(file_handle_);
 			}
 
-			ptr->file_handle_ = fopen(full_file_name.c_str(), "a");
-			if (ptr->file_handle_ == nullptr) {
+			file_handle_ = fopen(full_file_name.c_str(), "a");
+			if (file_handle_ == nullptr) {
 				printf("open fail errno = %d reason = %s \n", errno, strerror(errno));
 			}
-			ptr->need_reopen_ = false;
+			need_reopen_ = false;
 		}
 
-		if (ftell(ptr->file_handle_) > ptr->max_size_) {
-			fclose(ptr->file_handle_);
+		if (file_handle_ && ftell(file_handle_) > max_size_) {
+			fclose(file_handle_);
+			file_handle_ = nullptr;
 
 			// 单个日志文件超过最大大小
-			ptr->no_++;
+			no_++;
 			std::stringstream ss2;
-			ss2 << ptr->file_path_ << ptr->file_name_ << "_" << ptr->date_ << "_"
-				<< LogTypeToString(ptr->log_type_) << "_" << ptr->no_ << ".log";
+			ss2 << file_path_ << file_name_ << "_" << date_ << "_" << LogTypeToString(log_type_)
+				<< "_" << no_ << ".log";
 			full_file_name = ss2.str();
 
-			// printf("open file %s", full_file_name.c_str());
-			ptr->file_handle_ = fopen(full_file_name.c_str(), "a");
-			ptr->need_reopen_ = false;
+			file_handle_ = fopen(full_file_name.c_str(), "a");
+			need_reopen_ = false;
 		}
 
-		if (!ptr->file_handle_) {
+		if (!file_handle_) {
 			printf("open log file %s error!", full_file_name.c_str());
+			continue;
 		}
 
-		for (auto i : tmp) {
+		for (const auto& i : tmp) {
 			if (!i.empty()) {
-				fwrite(i.c_str(), 1, i.length(), ptr->file_handle_);
+				fwrite(i.c_str(), 1, i.length(), file_handle_);
 			}
 		}
-		tmp.clear();
-		fflush(ptr->file_handle_);
-		if (is_stop) {
-			break;
-		}
-	}
-	if (!ptr->file_handle_) {
-		fclose(ptr->file_handle_);
+		fflush(file_handle_);
 	}
 
-	return nullptr;
+	std::lock_guard<std::mutex> file_lock(file_mutex_);
+	if (file_handle_) {
+		fflush(file_handle_);
+		fclose(file_handle_);
+		file_handle_ = nullptr;
+	}
 }
 
 void AsyncLogger::push(std::vector<std::string>& buffer) {
-	if (!buffer.empty()) {
-		Mutex::ScopedLock lock(mutex_);
-		tasks_.push(buffer);
-		lock.unlock();
-		pthread_cond_signal(&condition_);
+	if (buffer.empty()) {
+		return;
 	}
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (stop_) {
+			return;
+		}
+		tasks_.push(buffer);
+	}
+	condition_.notify_one();
 }
 
 void AsyncLogger::flush() {
+	std::lock_guard<std::mutex> lock(file_mutex_);
 	if (file_handle_) {
 		fflush(file_handle_);
 	}
 }
 
 void AsyncLogger::stop() {
-	if (!stop_) {
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (stop_) {
+			return;
+		}
 		stop_ = true;
-		pthread_cond_signal(&condition_);
+	}
+	condition_.notify_all();
+}
+
+void AsyncLogger::join() {
+	if (thread_.joinable()) {
+		thread_.join();
 	}
 }
 
@@ -426,8 +427,9 @@ void Exit(int code) {
 		"It's sorry to said we Start CRPC server error, look up log file to "
 		"get "
 		"more details!\n");
-	rpc_logger->flush();
-	pthread_join(rpc_logger->getAsyncLogger()->thread_, nullptr);
+	if (rpc_logger) {
+		rpc_logger->flush();
+	}
 
 	_exit(code);
 }

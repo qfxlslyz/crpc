@@ -1,6 +1,6 @@
 BasedOnStyle: Google
 Language: Cpp
-Standard: Cpp11
+Standard: Cpp17
 ColumnLimit: 100
 UseTab: Always
 IndentWidth: 4
@@ -19,7 +19,7 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<(assert|ctype|errno|float|limits|math|stdarg|stddef|stdint|stdio|stdlib|string|time)\.h>'
     Priority: 2
-  - Regex: '^<(arpa/|fcntl\.h|netinet/|pthread\.h|signal\.h|sys/|unistd\.h)'
+  - Regex: '^<(arpa/|fcntl\.h|netinet/|signal\.h|sys/|unistd\.h)'
     Priority: 2
   - Regex: '^<'
     Priority: 3

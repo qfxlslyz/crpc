@@ -65,6 +65,9 @@ public:
 	// 为新连接创建 TcpConnection 对象，分配给指定的 IO 线程
 	TcpConnection::Ptr addClient(IOThread* io_thread, int fd);
 
+	// 由连接 IO 线程发起，在 MainReactor 中移除并最终释放连接对象。
+	void removeClient(int fd, TcpConnection::Ptr conn);
+
 	// 刷新连接在时间轮中的位置（收到数据时调用，防止被超时淘汰）
 	void freshTcpConnection(TcpTimeWheel::TcpConnectionSlot::Ptr slot);
 
@@ -84,9 +87,6 @@ public:
 private:
 	// accept 主协程函数：循环调用 accept，为每个新连接创建 TcpConnection
 	void mainAcceptCorFunc();
-
-	// 定时清理已关闭的客户端连接
-	void clearClientTimerFunc();
 
 private:
 	NetAddress::Ptr addr_;	// 服务器监听地址
@@ -112,8 +112,6 @@ private:
 	TcpTimeWheel::Ptr time_wheel_;	// 连接超时时间轮
 
 	std::map<int, std::shared_ptr<TcpConnection>> clients_;	 // fd -> 连接映射
-
-	TimerEvent::Ptr clear_client_timer_event_{nullptr};
 };
 
 }  // namespace crpc

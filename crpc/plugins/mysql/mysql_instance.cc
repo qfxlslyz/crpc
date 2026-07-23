@@ -67,9 +67,10 @@ int MySQLInstance::reconnect() {
 		sql_handler_ = nullptr;
 	}
 
-	Mutex::ScopedLock lock(mutex_);
-	sql_handler_ = mysql_init(nullptr);
-	lock.unlock();
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		sql_handler_ = mysql_init(nullptr);
+	}
 	if (!sql_handler_) {
 		ErrorLog << "failed to call mysql_init allocate MYSQL instance";
 		return -1;

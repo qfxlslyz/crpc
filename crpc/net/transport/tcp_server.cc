@@ -7,6 +7,7 @@
 #include "crpc/net/transport/tcp_connection_time_wheel.h"
 #include "crpc/net/transport/tcp_server.h"
 
+#include <utility>
 #include <assert.h>
 #include <fcntl.h>
 #include <string.h>
@@ -126,11 +127,6 @@ TcpServer::TcpServer(NetAddress::Ptr addr, Dispatcher::Ptr dispatcher, Codec::Pt
 	time_wheel_ = std::make_shared<TcpTimeWheel>(main_reactor_, rpc_config->timewheel_bucket_num_,
 												 rpc_config->timewheel_interval_);
 
-	// 周期性清理已经关闭的连接对象，真正释放 clients_ 中的 shared_ptr
-	clear_client_timer_event_ = std::make_shared<TimerEvent>(
-		10000, true, std::bind(&TcpServer::clearClientTimerFunc, this));
-	main_reactor_->getTimer()->addTimerEvent(clear_client_timer_event_);
-
 	InfoLog << "TcpServer setup on [" << addr_->toString() << "]";
 }
 
@@ -201,6 +197,23 @@ TcpConnection::Ptr TcpServer::addClient(IOThread* io_thread, int fd) {
 	}
 }
 
+void TcpServer::removeClient(int fd, TcpConnection::Ptr conn) {
+	main_reactor_->addTask(
+		[this, fd, conn = std::move(conn)]() {
+			auto it = clients_.find(fd);
+			if (it != clients_.end() && it->second.get() == conn.get()) {
+				DebugLog << "remove closed TcpConnection [fd:" << fd << "] in MainReactor";
+				clients_.erase(it);
+			}
+
+			// fd 已复用时 map 中会是新连接，不能删除它；但旧连接仍应从计数中扣除。
+			if (tcp_counts_ > 0) {
+				--tcp_counts_;
+			}
+		},
+		true);
+}
+
 void TcpServer::freshTcpConnection(TcpTimeWheel::TcpConnectionSlot::Ptr slot) {
 	// 时间轮运行在主 Reactor，跨线程刷新时通过任务投递回主 Reactor 执行
 	auto cb = [slot, this]() mutable {
@@ -208,25 +221,6 @@ void TcpServer::freshTcpConnection(TcpTimeWheel::TcpConnectionSlot::Ptr slot) {
 		slot.reset();
 	};
 	main_reactor_->addTask(cb);
-}
-
-void TcpServer::clearClientTimerFunc() {
-	// DebugLog << "this IOThread loop timer execute";
-
-	// 每轮循环删除已关闭的 TcpConnection
-	// 用于释放内存
-	// DebugLog << "clients_.size=" << clients_.size();
-	for (auto& i : clients_) {
-		// TcpConnection::Ptr s_conn = i.second;
-		// DebugLog << "state = " << s_conn->getState();
-		if (i.second && i.second.use_count() > 0 && i.second->getState() == kClosed) {
-			// 需要删除 TcpConnection
-			DebugLog << "TcpConection [fd:" << i.first
-					 << "] will delete, state=" << i.second->getState();
-			(i.second).reset();
-			// s_conn.reset();
-		}
-	}
 }
 
 NetAddress::Ptr TcpServer::getPeerAddr() {

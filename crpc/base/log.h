@@ -11,20 +11,19 @@
 #define CRPC_BASE_LOG_H_
 
 #include "crpc/base/config.h"
-#include "crpc/base/mutex.h"
 
+#include <condition_variable>
 #include <memory>
-#include <pthread.h>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <thread>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
-
-#include <semaphore.h>
 
 namespace crpc {
 
@@ -187,7 +186,7 @@ private:
 /**
  * 异步日志写入器，在独立线程中将日志缓冲区的内容写入磁盘文件
  * 每个 AsyncLogger 管理一个日志文件，支持按日期和大小自动切分
- * 通过 pthread + 信号量实现生产者-消费者模型
+ * 通过标准线程、互斥锁和条件变量实现生产者-消费者模型
  */
 class AsyncLogger {
 public:
@@ -202,10 +201,8 @@ public:
 	// 将队列中的日志刷写到磁盘文件
 	void flush();
 
-	// 异步线程的入口函数
-	static void* execute(void*);
-
 	void stop();
+	void join();
 
 public:
 	std::queue<std::vector<std::string>> tasks_;  // 待写入的日志批次队列
@@ -220,13 +217,14 @@ private:
 	FILE* file_handle_{nullptr};  // 当前日志文件句柄
 	std::string date_;			  // 当前日志文件对应的日期
 
-	Mutex mutex_;
-	pthread_cond_t condition_;	// 条件变量，用于通知异步线程有新日志
+	std::mutex mutex_;
+	std::condition_variable condition_;	 // 通知异步线程有新日志或停止
 	bool stop_{false};
+	std::thread thread_;	 // 异步写入线程
+	std::mutex file_mutex_;	 // 保护文件句柄及切分状态
 
-public:
-	pthread_t thread_;	// 异步写入线程
-	sem_t semaphore_;	// 信号量，用于等待线程启动完成
+	// 异步线程的入口函数
+	void execute();
 };
 
 /**
@@ -265,8 +263,8 @@ public:
 	std::vector<std::string> app_buffer_;  // 应用日志缓冲区
 
 private:
-	Mutex app_buff_mutex_;	// 应用日志缓冲区锁
-	Mutex buff_mutex_;		// RPC 日志缓冲区锁
+	std::mutex app_buff_mutex_;	 // 应用日志缓冲区锁
+	std::mutex buff_mutex_;		 // RPC 日志缓冲区锁
 	bool is_init_{false};
 	AsyncLogger::Ptr async_rpc_logger_;	 // RPC 日志异步写入器
 	AsyncLogger::Ptr async_app_logger_;	 // 应用日志异步写入器

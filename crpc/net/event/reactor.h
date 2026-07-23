@@ -15,12 +15,12 @@
 #ifndef CRPC_NET_EVENT_REACTOR_H_
 #define CRPC_NET_EVENT_REACTOR_H_
 
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 
 #include <atomic>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -88,12 +88,12 @@ private:
 	int epfd_{-1};		// epoll 文件描述符
 	int wake_fd_{-1};	// eventfd，用于跨线程唤醒 epoll_wait
 	int timer_fd_{-1};	// timerfd，用于定时器
-	bool stop_flag_{false};
-	bool is_looping_{false};  // 是否正在执行事件循环
+	std::atomic<bool> stop_flag_{false};
+	std::atomic<bool> is_looping_{false};  // 是否正在执行事件循环
 	bool is_init_timer_{false};
 	pid_t tid_{0};	// 所属线程 ID
 
-	Mutex mutex_;
+	std::mutex mutex_;
 
 	std::vector<int> fds_;	// 已注册监听的 fd 列表
 	std::atomic<int> fd_size_;

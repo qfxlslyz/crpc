@@ -1,6 +1,6 @@
 # CRPC
 
-CRPC（Coroutine RPC）是一个基于 C++11 的轻量级协程 RPC 框架。它使用 Reactor、epoll、用户态协程、Protobuf 和内置二进制编解码构建核心 RPC 链路，对外同时提供同步和异步 RPC Channel，底层在等待 socket IO 时自动让出当前协程，让线程继续处理其他事件。
+CRPC（Coroutine RPC）是一个基于 C++17 的轻量级协程 RPC 框架。它使用 Reactor、epoll、用户态协程、Protobuf 和内置二进制编解码构建核心 RPC 链路，对外同时提供同步和异步 RPC Channel，底层在等待 socket IO 时自动让出当前协程，让线程继续处理其他事件。
 
 CRPC 采用多线程 Reactor 与用户态协程结合的协作式 M:N 模型。连接协程固定由所属 IO 线程的 SubReactor 调度，当前不支持跨 IO 线程的协程迁移和工作窃取。
 
@@ -183,11 +183,11 @@ if (controller->errorCode() != 0) {
 ## 环境要求
 
 - Linux
-- C++11 编译器
-- CMake 3.0+
+- C++17 编译器
+- CMake 3.8+
 - Protobuf
 - tinyxml
-- pthread / dl
+- C++ 标准线程库 / dl
 
 Ubuntu/Debian 可参考：
 

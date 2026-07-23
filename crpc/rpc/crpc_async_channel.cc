@@ -32,7 +32,7 @@ public:
 		// 创建独立的IO线程为异步RPC请求提供服务
 		io_thread_ = std::make_shared<IOThread>();
 		io_thread_->setThreadIndex(0);
-		sem_post(io_thread_->getStartSemaphore());
+		io_thread_->start();
 	}
 
 	Coroutine::Ptr addCoroutine(std::function<void()> callback) {

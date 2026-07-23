@@ -8,10 +8,8 @@
  */
 #ifndef CRPC_COROUTINE_MEMORY_H_
 #define CRPC_COROUTINE_MEMORY_H_
-#include "crpc/base/mutex.h"
-
-#include <atomic>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace crpc {
@@ -23,8 +21,6 @@ public:
 	Memory(int block_size, int block_count);
 
 	~Memory();
-
-	int getRefCount();
 
 	char* getStart();
 
@@ -47,9 +43,8 @@ private:
 	char* start_{nullptr};	// 内存起始地址
 	char* end_{nullptr};	// 内存结束地址
 
-	std::atomic<int> ref_counts_{0};  // 当前已分配的 block 数量
-	std::vector<bool> blocks_;		  // 每个 block 的使用状态（true=已占用）
-	Mutex mutex_;
+	std::vector<bool> blocks_;  // 每个 block 的使用状态（true=已占用）
+	std::mutex mutex_;
 };
 
 }  // namespace crpc

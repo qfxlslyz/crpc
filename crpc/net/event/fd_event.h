@@ -11,15 +11,17 @@
 #define CRPC_NET_EVENT_FD_EVENT_H_
 
 #include "crpc/base/log.h"
-#include "crpc/base/mutex.h"
 #include "crpc/coroutine/coroutine.h"
 #include "crpc/net/event/reactor.h"
 
 #include <assert.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+
+#include <shared_mutex>
 
 namespace crpc {
 
@@ -84,9 +86,6 @@ public:
 
 	void clearCoroutine();
 
-public:
-	Mutex mutex_;
-
 protected:
 	int fd_{-1};							// 文件描述符
 	std::function<void()> read_callback_;	// 可读事件回调
@@ -113,7 +112,7 @@ public:
 	static FdEventContainer* getFdContainer();
 
 private:
-	RWMutex mutex_;
+	std::shared_mutex mutex_;
 	std::vector<FdEvent::Ptr> fds_;
 };
 

@@ -23,7 +23,7 @@
 
 namespace crpc {
 
-// 获取当前时间的毫秒时间戳
+// 获取 CLOCK_MONOTONIC 单调时钟的毫秒值
 int64_t GetNowMs();
 
 /**
@@ -51,7 +51,7 @@ public:
 	void cancleRepeated() { is_repeated_ = false; }
 
 public:
-	int64_t arrive_time_;		  // 下次触发的时间点（毫秒时间戳）
+	int64_t arrive_time_;		  // 单调时钟上的下次触发时间点（毫秒）
 	int64_t interval_;			  // 触发间隔（毫秒）
 	bool is_repeated_{false};	  // 是否周期性重复执行
 	bool is_canceled_{false};	  // 是否已取消

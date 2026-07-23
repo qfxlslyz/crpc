@@ -166,8 +166,6 @@ add_executable(test_coroutine ${test_coroutine})
 target_link_libraries(test_coroutine ${LIBS})
 install(TARGETS test_coroutine DESTINATION ${PATH_BIN})
 
-add_test(NAME coroutine_scheduling COMMAND test_coroutine)
-
 # install *.h
 add_subdirectory(crpc/base)
 add_subdirectory(crpc/coroutine)

@@ -1,6 +1,6 @@
 BasedOnStyle: Google
 Language: Cpp
-Standard: Cpp17
+Standard: c++17
 ColumnLimit: 100
 UseTab: Always
 IndentWidth: 4

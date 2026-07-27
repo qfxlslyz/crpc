@@ -76,6 +76,68 @@ TcpAcceptor -> MainReactor + accept 协程
 
 客户端和服务端的 socket 等待都由 coroutine hook 与当前线程的 Reactor 协作：IO 暂未就绪时注册 epoll 事件并 `Yield` 当前子协程，事件就绪后由 Reactor 恢复对应协程。独立客户端使用 `CrpcAsyncChannel` 时无需初始化 RPC Server；首次有效异步调用会按需创建全进程唯一的 `AsyncClientRuntime`，后续异步 RPC 复用其 IO 线程、Reactor 和协程池。
 
+## 定时器模型
+
+CRPC 不为每个逻辑定时任务单独创建 `timerfd`。每个 Reactor 按需创建一个 `Timer`，由它使用一个 `timerfd` 统一管理该 Reactor 上的多个 `TimerEvent`，使时间事件和 socket IO 一样由 epoll 驱动。
+
+```text
+多个 TimerEvent
+      |
+      | 按到期时间排序
+      v
+std::multimap
+      |
+      | 只将最近到期时间设置到 timerfd
+      v
+一个 timerfd
+      |
+      v
+epoll_wait
+      |
+      v
+Timer::onTimer()
+      |
+      +-- 执行一次性回调
+      +-- 重新加入周期事件
+      +-- 恢复等待超时或 sleep 的协程
+```
+
+`TimerEvent` 使用 `CLOCK_MONOTONIC` 计算到期时间，避免系统时间调整影响超时。`Timer` 通过 `multimap` 保存所有待处理事件，但 timerfd 始终只关注最近一个到期时间；timerfd 可读后，`onTimer()` 会批量取出当前已经到期的事件、重新设置下一个最近到期时间，再在 Reactor 所属线程中执行回调。因此定时回调应保持轻量，通常只更新状态、推进时间轮或恢复协程。
+
+MainReactor 上的 Timer 主要用于日志周期刷新和服务端空闲连接时间轮；SubReactor 或异步客户端 Reactor 上的 Timer 主要用于 connect 超时、RPC 调用超时以及协程版 `sleep`。
+
+### 空闲连接时间轮
+
+服务端使用 `TcpTimeWheel` 批量检测长期没有收到数据的 TCP 连接。时间轮由 `bucket_count` 个桶组成，只使用一个周期 `TimerEvent`，每隔 `interval` 秒删除队首桶并在队尾补入空桶。这样定时器数量不会随连接数量增长，代价是超时检测精度由 `interval` 决定。
+
+```text
+SubReactor：新连接注册 / 收到数据
+                 |
+                 | TcpServer::freshTcpConnection()
+                 v
+        投递任务到 MainReactor
+                 |
+                 v
+MainReactor：把 TimeoutSlot 追加到队尾桶
+                 |
+                 | 周期 TimerEvent 推进一格
+                 v
+           删除队首过期桶
+                 |
+                 | 最后一个 Slot 引用被释放
+                 v
+       TimeoutSlot 析构并请求关闭连接
+                 |
+                 v
+    投递到连接所属 SubReactor 执行 shutdown
+```
+
+每条服务端连接只创建一个 `TimeoutSlot`。Slot 弱引用 `TcpConnection`，时间轮的桶通过 `shared_ptr` 持有 Slot；新连接建立或连接收到数据时，会把同一个 Slot 再追加到当前队尾桶，而不会从旧桶中删除原记录。旧桶出队时，如果较新的桶仍持有该 Slot，它就不会析构；连接持续空闲、最后一个桶引用被释放后，Slot 的析构回调才会关闭仍然存活的连接。这种引用计数续期方式让刷新操作保持为追加操作，避免在所有桶中查找和移动连接。
+
+时间轮由 MainReactor 管理。连接数据在 SubReactor 中读取，SubReactor 只通过 `TcpServer` 发起续期请求，实际桶修改被投递到 MainReactor 串行执行；超时发生后，连接关闭又被投递回该连接所属的 SubReactor，避免跨线程直接操作 fd。
+
+连接的空闲检测时间约为 `(bucket_count - 1) * interval` 到 `bucket_count * interval`。示例配置使用 6 个桶和 10 秒间隔，因此连接在持续没有收到数据后约 50～60 秒被检测为超时。
+
 ## 协程模型
 
 当前项目采用“每个线程一个主协程 + 多个子协程”的非对称协程模型。主协程不是业务入口的 `main()` 函数，而是当前线程中的调度上下文；子协程用于执行 accept、连接读写、RPC 调用等具体任务。

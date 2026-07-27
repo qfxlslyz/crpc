@@ -1,3 +1,10 @@
+#include "crpc/base/config.h"
+#include "crpc/base/log.h"
+#include "crpc/base/run_time.h"
+#include "crpc/coroutine/coroutine.h"
+#include "crpc/net/event/reactor.h"
+#include "crpc/net/event/timer.h"
+
 #include <algorithm>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,13 +23,6 @@
 #ifdef DECLARE_MYSQL_PLUGIN
 #include <mysql/mysql.h>
 #endif
-
-#include "crpc/base/config.h"
-#include "crpc/base/log.h"
-#include "crpc/base/run_time.h"
-#include "crpc/coroutine/coroutine.h"
-#include "crpc/net/event/reactor.h"
-#include "crpc/net/event/timer.h"
 
 namespace crpc {
 

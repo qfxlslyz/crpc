@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <vector>
 #include <sstream>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -23,7 +24,6 @@
 #include <thread>
 #include <time.h>
 #include <unistd.h>
-#include <vector>
 
 namespace crpc {
 
@@ -37,7 +37,7 @@ std::string FormatString(const char* str, Args&&... args) {
 	std::string result;
 	if (size > 0) {
 		result.resize(size);
-		snprintf(&result[0], size + 1, str, args...);
+		snprintf(&result[0], size, str, args...);
 	}
 
 	return result;
@@ -131,9 +131,8 @@ std::string LevelToString(LogLevel level);
 bool OpenLog();
 
 /**
- * 日志事件，封装一条日志的全部上下文信息（时间、级别、文件、行号、协程 ID
- * 等）。 生命周期: 构造 -> 通过 getStringStream() 写入内容 -> log() 提交到
- * Logger
+ * 日志事件，封装一条日志的全部上下文信息（时间、级别、文件、行号、协程 ID等）
+ * 生命周期: 构造 -> 通过 getStringStream() 写入内容 -> log() 提交到 Logger
  */
 class LogEvent {
 public:

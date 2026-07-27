@@ -64,12 +64,12 @@ void TcpConnection::setUpServer() {
 }
 
 void TcpConnection::registerToTimeWheel() {
-	// 槽位过期时关闭连接；收到数据时 TcpServer 会刷新槽位延长生存时间
+	// 每条服务端连接只创建一个 Slot。时间轮持有 Slot，Slot 弱引用连接；
+	// 最后一个时间轮引用过期时，析构回调将关闭仍然存活的连接
 	auto cb = [](TcpConnection::Ptr conn) { conn->shutdownConnection(); };
-	TcpTimeWheel::TcpConnectionSlot::Ptr tmp =
-		std::make_shared<TimeoutSlot<TcpConnection>>(shared_from_this(), cb);
-	weak_slot_ = tmp;
-	tcp_svr_->freshTcpConnection(tmp);
+	auto slot = std::make_shared<TimeoutSlot<TcpConnection>>(shared_from_this(), cb);
+	weak_slot_ = slot;
+	tcp_svr_->freshTcpConnection(slot);
 }
 
 void TcpConnection::setUpClient() {
@@ -176,7 +176,9 @@ void TcpConnection::input() {
 	InfoLog << "recv [" << count << "] bytes data from [" << peer_addr_->toString() << "], fd ["
 			<< fd_ << "]";
 	if (connection_type_ == kServerConnection) {
-		// 服务端连接有数据交互时刷新时间轮，避免活跃连接被误判为空闲
+		// 当前代码运行在连接所属的 SubReactor，只向 TcpServer 发起续期请求；
+		// TcpServer 随后在 MainReactor 线程把同一个 Slot 追加到时间轮队尾
+		// 较新的引用会阻止旧桶出队时触发析构，从而延长连接生存时间
 		TcpTimeWheel::TcpConnectionSlot::Ptr tmp = weak_slot_.lock();
 		if (tmp) {
 			tcp_svr_->freshTcpConnection(tmp);

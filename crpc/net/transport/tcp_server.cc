@@ -215,7 +215,8 @@ void TcpServer::removeClient(int fd, TcpConnection::Ptr conn) {
 }
 
 void TcpServer::freshTcpConnection(TcpTimeWheel::TcpConnectionSlot::Ptr slot) {
-	// 时间轮运行在主 Reactor，跨线程刷新时通过任务投递回主 Reactor 执行
+	// 数据读取发生在连接所属的 SubReactor；时间轮归 MainReactor 管理。
+	// 通过任务投递串行修改桶结构，避免多个 IO 线程并发访问 wheel_。
 	auto cb = [slot, this]() mutable {
 		this->getTimeWheel()->fresh(slot);
 		slot.reset();

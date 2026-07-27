@@ -3,7 +3,7 @@
   <!--日志配置-->
   <log>
     <!--日志文件路径-->
-    <log_path>./</log_path>
+    <log_path>./log/</log_path>
     <log_prefix>test_rpc_server</log_prefix>
 
     <!--单个日志文件的最大大小，单位 MB-->
